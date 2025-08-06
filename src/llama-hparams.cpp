@@ -153,3 +153,12 @@ bool llama_hparams::is_swa(uint32_t il) const {
 
     GGML_ABORT("fatal error");
 }
+
+
+bool llama_hparams::is_rwkv(uint32_t il) const {
+    if (il < n_layer) {
+        return rwkv_layers[il];
+    }
+
+    GGML_ABORT("fatal error");
+}

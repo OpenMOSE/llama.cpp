@@ -5222,15 +5222,16 @@ class HRwkv7MoeModel(TextModel):
             result = result.replace(search_str, replacement)
         return result
     hxa079_list = {
+        "self_attn.w0":"attention.time_mix_w0",
         "self_attn.w1":"attention.time_mix_w1",
         "self_attn.w2":"attention.time_mix_w2",
-
+        "self_attn.a0":"attention.time_mix_a0",
         "self_attn.a1":"attention.time_mix_a1",
         "self_attn.a2":"attention.time_mix_a2",
-
+        "self_attn.v0":"attention.time_mix_v0",
         "self_attn.v1":"attention.time_mix_v1",
         "self_attn.v2":"attention.time_mix_v2",
-
+        "self_attn.k0":"attention.time_mix_k0",
         "self_attn.k1":"attention.time_mix_k1",
         "self_attn.k2":"attention.time_mix_k2",
 
@@ -5282,6 +5283,11 @@ class HRwkv7MoeModel(TextModel):
             else:
                 return []
 
+
+
+        name = replace_multiple(name,hxa079_list)
+
+
         data_torch = data_torch.squeeze()
         new_name = self.map_tensor_name(name)
 
@@ -5295,6 +5301,8 @@ class HRwkv7MoeModel(TextModel):
                 "time_mix_v1.weight", "time_mix_v2.weight",
                 "time_mix_k1.weight", "time_mix_k2.weight",
                 "time_mix_g1.weight", "time_mix_g2.weight",
+                "time_mix_g1.weight", "time_mix_g2.weight",
+                "r_norm":"q_norm",
             ]
         ):
             data_torch = data_torch.transpose(0, 1)
@@ -5359,6 +5367,15 @@ class HRwkv7MoeModel(TextModel):
         nope_in_transformer = self.hparams.get("nope_in_transformer", True)
         nope_in_rwkv = self.hparams.get("nope_in_rwkv", False)
 
+        transformer_layers = self.hparams.get("transformer_layers", [])
+
+        rwkv_layer_pattern = []
+        for i in range(int(block_count)):
+            rwkv_layer_pattern.append(True)
+
+        for IsAttention in transformer_layers:
+            rwkv_layer_pattern[IsAttention] = False
+
 
         rms_norm_eps = self.hparams["rms_norm_eps"]
         intermediate_size = self.hparams["intermediate_size"]
@@ -5394,6 +5411,7 @@ class HRwkv7MoeModel(TextModel):
         self.gguf_writer.add_nope_in_rwkv(nope_in_rwkv)
         self.gguf_writer.add_head_count(num_attention_heads)
         self.gguf_writer.add_head_count_kv(num_key_value_heads)
+        self.gguf_writer.add_rwkv_layer_pattern(rwkv_layer_pattern)
 
 
         # required by llama.cpp, unused

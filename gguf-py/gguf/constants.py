@@ -140,7 +140,7 @@ class Keys:
         DECAY_LORA_RANK              = "{arch}.attention.decay_lora_rank"
         ICLR_LORA_RANK               = "{arch}.attention.iclr_lora_rank"
         VALUE_RESIDUAL_MIX_LORA_RANK = "{arch}.attention.value_residual_mix_lora_rank"
-        KEY_RESIDUAL_MIX_LORA_RANK   = "{arch}.attention.value_residual_mix_lora_rank" # Added
+        KEY_RESIDUAL_MIX_LORA_RANK   = "{arch}.attention.key_residual_mix_lora_rank" # Added
         GATE_LORA_RANK               = "{arch}.attention.gate_lora_rank"
         REL_BUCKETS_COUNT            = "{arch}.attention.relative_buckets_count"
         SLIDING_WINDOW               = "{arch}.attention.sliding_window"
@@ -149,6 +149,7 @@ class Keys:
         VALUE_LENGTH_MLA             = "{arch}.attention.value_length_mla"
         SHARED_KV_LAYERS             = "{arch}.attention.shared_kv_layers"
         SLIDING_WINDOW_PATTERN       = "{arch}.attention.sliding_window_pattern"
+        RWKV_LAYER_PATTERN           = "{arch}.attention.rwkv_layer_pattern" #added
         ENABLE_QK_NORM               = "{arch}.attention.enable_qk_norm" # added
         NOPE_IN_TRANSFORMER          = "{arch}.attention.nope_in_transformer" # added
         NOPE_IN_RWKV                 = "{arch}.attention.nope_in_rwkv" # added

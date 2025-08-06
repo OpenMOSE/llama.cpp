@@ -90,6 +90,7 @@ struct llama_hparams {
     uint32_t n_lora_decay           = 0;
     uint32_t n_lora_iclr            = 0;
     uint32_t n_lora_value_res_mix   = 0;
+    uint32_t n_lora_key_res_mix     = 0; //hxa079
     uint32_t n_lora_gate            = 0;
 
     float    rope_attn_factor = 1.0f;
@@ -110,6 +111,13 @@ struct llama_hparams {
     // if swa_layers[il] == false, then layer il is dense (i.e. non-SWA)
     // by default, all layers are dense
     std::array<bool, LLAMA_MAX_LAYERS> swa_layers;
+
+    // RWKV hxa079 hybrid
+    uint32_t n_rwkv = 0;
+    // if rwkv_layers[il] == true, then layer il is rwkv
+    // if rwkv_layers[il] == false, then layer il is dense (i.e. non-rwkv)
+    // by default, all layers are dense
+    std::array<bool, LLAMA_MAX_LAYERS> rwkv_layers;
 
     // for State Space Models
     uint32_t ssm_d_conv  = 0;
@@ -219,6 +227,8 @@ struct llama_hparams {
     uint32_t n_pos_per_embd() const;
 
     bool is_swa(uint32_t il) const;
+
+    bool is_rwkv(uint32_t il) const;
 };
 
 static_assert(std::is_trivially_copyable<llama_hparams>::value, "llama_hparams must be trivially copyable");

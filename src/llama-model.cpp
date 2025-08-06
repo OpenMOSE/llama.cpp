@@ -1578,6 +1578,28 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
+        case LLM_ARCH_HRWKV7MOE: //Added hxa079
+            {
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS,                hparams.f_norm_eps, false);
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,            hparams.f_norm_rms_eps, false);
+                ml.get_key(LLM_KV_WKV_HEAD_SIZE,                          hparams.wkv_head_size);
+                ml.get_key(LLM_KV_ATTENTION_DECAY_LORA_RANK,              hparams.n_lora_decay);
+                ml.get_key(LLM_KV_ATTENTION_ICLR_LORA_RANK,               hparams.n_lora_iclr);
+                ml.get_key(LLM_KV_ATTENTION_VALUE_RESIDUAL_MIX_LORA_RANK, hparams.n_lora_value_res_mix);
+                ml.get_key(LLM_KV_ATTENTION_KEY_RESIDUAL_MIX_LORA_RANK,   hparams.n_lora_key_res_mix);
+                ml.get_key(LLM_KV_ATTENTION_GATE_LORA_RANK,               hparams.n_lora_gate);
+
+                ml.get_key(LLM_KV_ATTENTION_RWKV_LAYER_PATTERN,   hparams.rwkv_layers);
+
+                ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
+
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+                switch (hparams.n_layer) {
+                    case 48: type = LLM_TYPE_30B_A3B; break;
+                    //case 94: type = LLM_TYPE_235B_A22B; break;  maybe i can make this, if i got million
+                    default: type = LLM_TYPE_UNKNOWN;
+                }
+            } break;
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:
             {
@@ -4700,6 +4722,118 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     }
 
                 } break;
+
+            case LLM_ARCH_HRWKV7MOE:
+                {
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+
+                    // output
+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+                    // if output is NULL, init from the input tok embed
+                    if (output == NULL) {
+                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+                    }
+
+                    bool is_rwkv_layer = hparams.is_rwkv(i);
+
+                    const int n_lora_decay = hparams.n_lora_decay;
+                    const int n_lora_iclr = hparams.n_lora_iclr;
+                    const int n_lora_value_res_mix = hparams.n_lora_value_res_mix;
+                    const int n_lora_gate = hparams.n_lora_gate;
+                    const int attn_hidden_size = n_embd;
+
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        if (is_rwkv_layer){
+                            
+                            layer.time_mix_w1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W1, "weight", i), {n_embd, n_lora_decay}, 0);
+                            layer.time_mix_w2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W2, "weight", i), {n_lora_decay, n_embd_head_k * n_head}, 0);
+                            layer.time_mix_w0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W0, "weight", i), {n_embd_head_k * n_head}, 0);
+
+                            
+                            layer.time_mix_a1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A1, "weight", i), {n_embd, n_lora_iclr}, 0);
+                            layer.time_mix_a2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A2, "weight", i), {n_lora_iclr, n_embd_head_k * n_head}, 0);
+                            layer.time_mix_a0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A0, "weight", i), {n_embd_head_k * n_head}, 0);
+
+                            if (i == 0) {
+                                // actually not used
+                                layer.time_mix_v1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V1, "weight", i), {n_embd, n_lora_iclr}, 0);
+                                layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_iclr, n_embd}, 0);
+                                layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd}, 0);
+
+                                
+                                layer.time_mix_k1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K1, "weight", i), {n_embd, n_lora_iclr}, 0);
+                                layer.time_mix_k2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K2, "weight", i), {n_lora_iclr, n_embd}, 0);
+                                layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd}, 0);
+
+                                
+                            } else {
+                                
+                                layer.time_mix_v1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V1, "weight", i), {n_embd, n_lora_value_res_mix}, 0);
+                                layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_value_res_mix, n_embd_gqa}, 0);
+                                layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd_gqa}, 0);
+
+                                
+                                layer.time_mix_k1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K1, "weight", i), {n_embd, n_lora_key_res_mix}, 0);
+                                layer.time_mix_k2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K2, "weight", i), {n_lora_key_res_mix, n_embd_gqa}, 0);
+                                layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd_gqa}, 0);
+                            }
+
+                            layer.time_mix_g1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G1, "weight", i), {n_embd, n_lora_gate});
+                            layer.time_mix_g2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G2, "weight", i), {n_lora_gate, n_embd_head_k * n_head});
+
+                            try {
+                                layer.time_mix_lerp_fused = create_tensor(tn(LLM_TENSOR_TIME_MIX_LERP_FUSED, "weight", i), {n_embd, 1, 1, 6}, 0);
+                            } catch(std::runtime_error & e) {
+                                // ARWKV models may not have gate tensors
+                                layer.time_mix_lerp_fused = create_tensor(tn(LLM_TENSOR_TIME_MIX_LERP_FUSED, "weight", i), {n_embd, 1, 1, 5}, 0);
+                            }
+
+                            layer.time_mix_r_k = create_tensor(tn(LLM_TENSOR_TIME_MIX_R_K, "weight", i), {n_embd_head_k * n_head}, 0);
+
+                            layer.time_mix_receptance = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
+                            layer.time_mix_key = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "weight", i), {n_embd, n_embd_gqa}, 0);
+                            layer.time_mix_value = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "weight", i), {n_embd, n_embd_gqa}, 0);
+                            
+                            layer.time_mix_output = create_tensor(tn(LLM_TENSOR_TIME_MIX_OUTPUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+
+                        }
+                        else{
+                            layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
+                            layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_gqa}, 0);
+                            layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_gqa}, 0);
+                            layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+                        }
+
+                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+
+                        
+                        layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
+                        layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
+
+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+
+                        layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+
+
+                        if (n_expert == 0) {
+                            throw std::runtime_error("n_expert must be > 0 for QWEN3MOE");
+                        }
+                        if (n_expert_used == 0) {
+                            throw std::runtime_error("n_expert_used must be > 0 for QWEN3MOE");
+                        }
+
+                        // MoE branch
+                        const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
+
+                        layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                        layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
+                        layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                    }
+                } break;
+            
             case LLM_ARCH_CHAMELEON:
                 {
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);

@@ -156,6 +156,7 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_ATTENTION_DECAY_LORA_RANK,              "%s.attention.decay_lora_rank"              },
     { LLM_KV_ATTENTION_ICLR_LORA_RANK,               "%s.attention.iclr_lora_rank"               },
     { LLM_KV_ATTENTION_VALUE_RESIDUAL_MIX_LORA_RANK, "%s.attention.value_residual_mix_lora_rank" },
+    { LLM_KV_ATTENTION_KEY_RESIDUAL_MIX_LORA_RANK,   "%s.attention.key_residual_mix_lora_rank" },
     { LLM_KV_ATTENTION_RWKV_LAYER_PATTERN,           "%s.attention.rwkv_layer_pattern"           },
     { LLM_KV_ATTENTION_GATE_LORA_RANK,               "%s.attention.gate_lora_rank"               },
     { LLM_KV_ATTENTION_RELATIVE_BUCKETS_COUNT,       "%s.attention.relative_buckets_count"       },

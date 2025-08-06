@@ -117,7 +117,7 @@ struct llama_hparams {
     // if rwkv_layers[il] == true, then layer il is rwkv
     // if rwkv_layers[il] == false, then layer il is dense (i.e. non-rwkv)
     // by default, all layers are dense
-    std::array<bool, LLAMA_MAX_LAYERS> rwkv_layers;
+    std::array<uint32_t, LLAMA_MAX_LAYERS> rwkv_layers;
 
     // for State Space Models
     uint32_t ssm_d_conv  = 0;

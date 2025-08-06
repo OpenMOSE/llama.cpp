@@ -396,6 +396,19 @@ namespace GGUFMeta {
     template<typename T>
     bool llama_model_loader::get_key(enum llm_kv kid, T & result, bool required) {
         return get_key(llm_kv(kid), result, required);
+        // auto key = llm_kv(kid);
+        // auto it = kv_overrides.find(key);
+
+        // const struct llama_model_kv_override * override =
+        //     it != kv_overrides.end() ? &it->second : nullptr;
+
+        // const bool found = GGUFMeta::GKV<T>::set(meta.get(), key, result, override);
+
+        // if (required && !found) {
+        //     throw std::runtime_error(format("key not found in model: %s", key.c_str()));
+        // }
+
+        // return found;
     }
 
     template bool llama_model_loader::get_key<bool>       (enum llm_kv kid, bool & result,        bool required);

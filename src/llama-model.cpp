@@ -438,7 +438,8 @@ void llama_model::load_arch(llama_model_loader & ml) {
 
 void llama_model::load_hparams(llama_model_loader & ml) {
     const gguf_context * ctx = ml.meta.get();
-
+    printf("UGYUUGYU\n");
+    
     // get metadata as string
     for (int i = 0; i < gguf_get_n_kv(ctx); i++) {
         gguf_type type = gguf_get_kv_type(ctx, i);
@@ -481,7 +482,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     } else {
         GGML_ASSERT(hparams.n_expert_used == 0);
     }
-
+    
     std::fill(hparams.n_head_arr.begin(),    hparams.n_head_arr.end(),    0);
     std::fill(hparams.n_head_kv_arr.begin(), hparams.n_head_kv_arr.end(), 0);
     std::fill(hparams.n_ff_arr.begin(),      hparams.n_ff_arr.end(),      0);
@@ -493,6 +494,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     std::fill(hparams.rope_sections.begin(), hparams.rope_sections.end(), 0);
 
     std::fill(hparams.swa_layers.begin(), hparams.swa_layers.end(), 0);
+    //std::fill(hparams.rwkv_layers.begin(), hparams.rwkv_layers.end(), true);
 
     ml.get_key_or_arr(LLM_KV_FEED_FORWARD_LENGTH,  hparams.n_ff_arr,   hparams.n_layer, false);
     ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT, hparams.n_head_arr, hparams.n_layer, false);
@@ -512,7 +514,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     // rope_freq_base (optional)
     hparams.rope_freq_base_train = 10000.0f;
     ml.get_key(LLM_KV_ROPE_FREQ_BASE, hparams.rope_freq_base_train, false);
-
+    
     std::string rope_scaling("linear");
     ml.get_key(LLM_KV_ROPE_SCALING_TYPE, rope_scaling, false);
     hparams.rope_scaling_type_train = llama_rope_scaling_type_from_string(rope_scaling);
@@ -1580,23 +1582,26 @@ void llama_model::load_hparams(llama_model_loader & ml) {
             } break;
         case LLM_ARCH_HRWKV7MOE: //Added hxa079
             {
-                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS,                hparams.f_norm_eps, false);
+                printf("OHAYO");
+                
+                //ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS,                hparams.f_norm_eps, false);
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,            hparams.f_norm_rms_eps, false);
-                ml.get_key(LLM_KV_WKV_HEAD_SIZE,                          hparams.wkv_head_size);
+                //ml.get_key(LLM_KV_WKV_HEAD_SIZE,                          hparams.wkv_head_size);
                 ml.get_key(LLM_KV_ATTENTION_DECAY_LORA_RANK,              hparams.n_lora_decay);
                 ml.get_key(LLM_KV_ATTENTION_ICLR_LORA_RANK,               hparams.n_lora_iclr);
                 ml.get_key(LLM_KV_ATTENTION_VALUE_RESIDUAL_MIX_LORA_RANK, hparams.n_lora_value_res_mix);
+                
                 ml.get_key(LLM_KV_ATTENTION_KEY_RESIDUAL_MIX_LORA_RANK,   hparams.n_lora_key_res_mix);
                 ml.get_key(LLM_KV_ATTENTION_GATE_LORA_RANK,               hparams.n_lora_gate);
-
-                ml.get_key(LLM_KV_ATTENTION_RWKV_LAYER_PATTERN,   hparams.rwkv_layers);
-
+                printf("hello hrwkv!\n");
+                //ml.get_key(LLM_KV_ATTENTION_RWKV_LAYER_PATTERN,   hparams.rwkv_layers);
+                throw std::runtime_error("HRWKV7!");
+                ml.get_key_or_arr(LLM_KV_ATTENTION_RWKV_LAYER_PATTERN, hparams.rwkv_layers, hparams.n_layer, 1);
                 ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
-
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
                 switch (hparams.n_layer) {
                     case 48: type = LLM_TYPE_30B_A3B; break;
-                    //case 94: type = LLM_TYPE_235B_A22B; break;  maybe i can make this, if i got million
+                    case 94: type = LLM_TYPE_235B_A22B; break;  //maybe i can make this, if i got million
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
@@ -4735,16 +4740,18 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
                     }
 
-                    bool is_rwkv_layer = hparams.is_rwkv(i);
+                    
 
                     const int n_lora_decay = hparams.n_lora_decay;
                     const int n_lora_iclr = hparams.n_lora_iclr;
                     const int n_lora_value_res_mix = hparams.n_lora_value_res_mix;
+                    const int n_lora_key_res_mix = hparams.n_lora_key_res_mix;
                     const int n_lora_gate = hparams.n_lora_gate;
                     const int attn_hidden_size = n_embd;
 
                     for (int i = 0; i < n_layer; ++i) {
                         auto & layer = layers[i];
+                        bool is_rwkv_layer = hparams.is_rwkv(i);
 
                         if (is_rwkv_layer){
                             
@@ -4781,8 +4788,8 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                                 layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd_gqa}, 0);
                             }
 
-                            layer.time_mix_g1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G1, "weight", i), {n_embd, n_lora_gate});
-                            layer.time_mix_g2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G2, "weight", i), {n_lora_gate, n_embd_head_k * n_head});
+                            layer.time_mix_g1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G1, "weight", i), {n_embd, n_lora_gate},0);
+                            layer.time_mix_g2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G2, "weight", i), {n_lora_gate, n_embd_head_k * n_head},0);
 
                             try {
                                 layer.time_mix_lerp_fused = create_tensor(tn(LLM_TENSOR_TIME_MIX_LERP_FUSED, "weight", i), {n_embd, 1, 1, 6}, 0);
@@ -14640,7 +14647,7 @@ struct llm_build_rwkv7_base : public llm_graph_context {
 
      
         cur = ggml_reshape_2d(ctx0, cur, (head_size*n_head), n_tokens);
-        cur = ggml_scale_inplace(ctx, cur, 1.0f / sqrtf(float(head_size)));
+        cur = ggml_scale_inplace(ctx0, cur, 1.0f / sqrtf(float(head_size)));
 
         ggml_tensor * rk = ggml_sum_rows(ctx0,
                 ggml_mul(ctx0, ggml_mul(ctx0, k, r), ggml_reshape_2d(ctx0, layer.time_mix_r_k, head_size, n_head)));
@@ -14840,7 +14847,7 @@ struct llm_build_arwkv7 : public llm_build_rwkv7_base {
 
 
 struct llm_build_hrwkv7moe : public llm_build_rwkv7_base {
-    llm_build_hrwkv7moe(const llama_model & model, const llm_graph_params & params) : llm_build_rwkv7_base(params) {
+    llm_build_hrwkv7moe(const llama_model & model, const llm_graph_params & params) : llm_build_rwkv7_base(model,params) {
         const int64_t n_embd_head = hparams.n_embd_head_v;
 
         GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
@@ -14889,7 +14896,7 @@ struct llm_build_hrwkv7moe : public llm_build_rwkv7_base {
                                         k_first,//ggml_tensor *& first_layer_key,
                                         ubatch,//const llama_ubatch & ubatch,
                                         il//int   il
-                                        ) 
+                                        );
             }
             else
             {
@@ -18076,6 +18083,10 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
         case LLM_ARCH_ARWKV7:
             {
                 llm = std::make_unique<llm_build_arwkv7>(*this, params);
+            } break;
+        case LLM_ARCH_HRWKV7MOE:
+            {
+                llm = std::make_unique<llm_build_hrwkv7moe>(*this, params);
             } break;
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:

@@ -772,23 +772,23 @@ class TensorNameMap:
 
         MODEL_TENSOR.TIME_MIX_KEY: (
             "rwkv.blocks.{bid}.attention.key",     # rwkv6
-            "model.layers.{bid}.self_attn.k_proj", # rwkv6qwen2
+            #"model.layers.{bid}.self_attn.k_proj", # rwkv6qwen2
             "model.layers.{bid}.attention.key",    # rwkv7
-            "model.layers.{bid}.attention.k_proj", # rwkv7
+            #"model.layers.{bid}.attention.k_proj", # rwkv7
         ),
 
         MODEL_TENSOR.TIME_MIX_VALUE: (
             "rwkv.blocks.{bid}.attention.value",   # rwkv6
-            "model.layers.{bid}.self_attn.v_proj", # rwkv6qwen2
+            #"model.layers.{bid}.self_attn.v_proj", # rwkv6qwen2
             "model.layers.{bid}.attention.value",  # rwkv7
-            "model.layers.{bid}.attention.v_proj", # rwkv7
+            #"model.layers.{bid}.attention.v_proj", # rwkv7
         ),
 
         MODEL_TENSOR.TIME_MIX_RECEPTANCE: (
             "rwkv.blocks.{bid}.attention.receptance",  # rwkv6
-            "model.layers.{bid}.self_attn.q_proj",     # rwkv6qwen2
+            #"model.layers.{bid}.self_attn.q_proj",     # rwkv6qwen2
             "model.layers.{bid}.attention.receptance", # rwkv7
-            "model.layers.{bid}.attention.r_proj",     # rwkv7
+            #"model.layers.{bid}.attention.r_proj",     # rwkv7
         ),
 
         MODEL_TENSOR.TIME_MIX_GATE: (
@@ -803,9 +803,9 @@ class TensorNameMap:
 
         MODEL_TENSOR.TIME_MIX_OUTPUT: (
             "rwkv.blocks.{bid}.attention.output",  # rwkv6
-            "model.layers.{bid}.self_attn.o_proj", # rwkv6qwen2
+            #"model.layers.{bid}.self_attn.o_proj", # rwkv6qwen2
             "model.layers.{bid}.attention.output", # rwkv7
-            "model.layers.{bid}.attention.o_proj", # rwkv7
+            #"model.layers.{bid}.attention.o_proj", # rwkv7
         ),
 
         MODEL_TENSOR.CHANNEL_MIX_LERP_K: (

@@ -692,6 +692,7 @@ class GGUFWriter:
             self.add_uint32(Keys.Attention.HEAD_COUNT.format(arch=self.arch), count)
         else:
             self.add_array(Keys.Attention.HEAD_COUNT.format(arch=self.arch), count)
+        
 
     def add_head_count_kv(self, count: int | Sequence[int]) -> None:
         if isinstance(count, int):
@@ -809,6 +810,19 @@ class GGUFWriter:
 
     def add_value_residual_mix_lora_rank(self, length: int) -> None:
         self.add_uint32(Keys.Attention.VALUE_RESIDUAL_MIX_LORA_RANK.format(arch=self.arch), length)
+
+    #OpenMOSE Added
+    def add_enable_qk_norm(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.ENABLE_QK_NORM.format(arch=self.arch), value)
+
+    def add_nope_in_transformer(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.NOPE_IN_TRANSFORMER.format(arch=self.arch), value)
+
+    def add_nope_in_rwkv(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.NOPE_IN_RWKV.format(arch=self.arch), value)
+
+
+
 
     def add_gate_lora_rank(self, length: int) -> None:
         self.add_uint32(Keys.Attention.GATE_LORA_RANK.format(arch=self.arch), length)

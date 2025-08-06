@@ -689,6 +689,18 @@ class TensorNameMap:
             "model.layers.{bid}.attention.v2",            # rwkv7
         ),
 
+        MODEL_TENSOR.TIME_MIX_K0: (
+            "model.layers.{bid}.attention.k0",            # rwkv7
+        ),
+
+        MODEL_TENSOR.TIME_MIX_K1: (
+            "model.layers.{bid}.attention.k1",            # rwkv7
+        ),
+
+        MODEL_TENSOR.TIME_MIX_K2: (
+            "model.layers.{bid}.attention.k2",            # rwkv7
+        ),
+
         MODEL_TENSOR.TIME_MIX_G1: (
             "model.layers.{bid}.attention.g1",            # rwkv7
         ),

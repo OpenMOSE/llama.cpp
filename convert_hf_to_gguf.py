@@ -5206,59 +5206,66 @@ class HRwkv7MoeModel(TextModel):
 
     _experts: list[dict[str, Tensor]] | None = None
 
-    def replace_multiple(text, replace_dict):
-        """
-        辞書に基づいて文字列内の複数の文字列を置き換える
-        
-        Args:
-            text: 対象の文字列
-            replace_dict: {検索文字列: 置換文字列}の辞書
-        
-        Returns:
-            置き換え後の文字列
-        """
-        result = text
-        for search_str, replacement in replace_dict.items():
-            result = result.replace(search_str, replacement)
-        return result
-    hxa079_list = {
-        "self_attn.w0":"attention.time_mix_w0",
-        "self_attn.w1":"attention.time_mix_w1",
-        "self_attn.w2":"attention.time_mix_w2",
-        "self_attn.a0":"attention.time_mix_a0",
-        "self_attn.a1":"attention.time_mix_a1",
-        "self_attn.a2":"attention.time_mix_a2",
-        "self_attn.v0":"attention.time_mix_v0",
-        "self_attn.v1":"attention.time_mix_v1",
-        "self_attn.v2":"attention.time_mix_v2",
-        "self_attn.k0":"attention.time_mix_k0",
-        "self_attn.k1":"attention.time_mix_k1",
-        "self_attn.k2":"attention.time_mix_k2",
-
-        "self_attn.g1":"attention.time_mix_g1",
-        "self_attn.g1":"attention.time_mix_g2",
-
-        "self_attn.r_k":"attention.time_mix_r_k",
-
-        "self_attn.receptance":"attention.time_mix_receptance",
-        "self_attn.key":"attention.time_mix_key",
-        "self_attn.value":"attention.time_mix_value",
-        "self_attn.output":"attention.time_mix_output",
-    }
+    
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        
+        #print(f'name = {name} checking bid={bid}')
+        def replace_multiple(text, replace_dict):
+            """
+            辞書に基づいて文字列内の複数の文字列を置き換える
+            
+            Args:
+                text: 対象の文字列
+                replace_dict: {検索文字列: 置換文字列}の辞書
+            
+            Returns:
+                置き換え後の文字列
+            """
+            result = text
+            for search_str, replacement in replace_dict.items():
+                result = result.replace(search_str, replacement)
+            return result
+        hxa079_list = {
+            "self_attn.w0":"attention.w0",
+            "self_attn.w1":"attention.w1",
+            "self_attn.w2":"attention.w2",
+            "self_attn.a0":"attention.a0",
+            "self_attn.a1":"attention.a1",
+            "self_attn.a2":"attention.a2",
+            "self_attn.v0":"attention.v0",
+            "self_attn.v1":"attention.v1",
+            "self_attn.v2":"attention.v2",
+            "self_attn.k0":"attention.k0",
+            "self_attn.k1":"attention.k1",
+            "self_attn.k2":"attention.k2",
+
+            "self_attn.g1":"attention.g1",
+            "self_attn.g2":"attention.g2",
+
+            "self_attn.r_k":"attention.r_k",
+            "self_attn.r_norm":"self_attn.q_norm",
+
+            "self_attn.receptance":"attention.receptance",
+            "self_attn.key":"attention.key",
+            "self_attn.value":"attention.value",
+            "self_attn.output":"attention.output",
+        }
         
         #from Qwen2MoE
         # process the experts separately
         if name.find("experts") != -1:
             n_experts = self.hparams["num_experts"]
+            
             assert bid is not None
 
             if self._experts is None:
                 self._experts = [{} for _ in range(self.block_count)]
 
+            #print(self._experts)
+
             self._experts[bid][name] = data_torch
+
+            #print(len(self._experts[bid]))
 
             if len(self._experts[bid]) >= n_experts * 3:
                 tensors: list[tuple[str, Tensor]] = []
@@ -5277,14 +5284,22 @@ class HRwkv7MoeModel(TextModel):
                     merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
 
                     new_name = self.map_tensor_name(merged_name)
-
+                    #print('small expert append')
                     tensors.append((new_name, data_torch))
+                print('append tensor')
+                print(tensors)
+                exit()
                 return tensors
             else:
+                #print('none')
                 return []
 
 
+        print(name)
 
+        if 'head_size_record' in name or 'layer_architecture' in name:
+            print(f'{name} skipping')
+            return []
         name = replace_multiple(name,hxa079_list)
 
 
@@ -5302,7 +5317,7 @@ class HRwkv7MoeModel(TextModel):
                 "time_mix_k1.weight", "time_mix_k2.weight",
                 "time_mix_g1.weight", "time_mix_g2.weight",
                 "time_mix_g1.weight", "time_mix_g2.weight",
-                "r_norm":"q_norm",
+                
             ]
         ):
             data_torch = data_torch.transpose(0, 1)
@@ -5310,11 +5325,11 @@ class HRwkv7MoeModel(TextModel):
         if 'r_k' in new_name:
             data_torch = data_torch.flatten()
 
-        if bid == 0 and "time_mix_a" in new_name:
-            # dummy v0/v1/v2 on first layer
-            # easist way to make llama happy
-            yield (new_name.replace("time_mix_a", "time_mix_v"), data_torch)
-            yield (new_name.replace("time_mix_a", "time_mix_k"), data_torch)
+        # if bid == 0 and "time_mix_a" in new_name:
+        #     # dummy v0/v1/v2 on first layer
+        #     # easist way to make llama happy
+        #     yield (new_name.replace("time_mix_a", "time_mix_v"), data_torch)
+        #     yield (new_name.replace("time_mix_a", "time_mix_k"), data_torch)
 
         yield (new_name, data_torch)
 

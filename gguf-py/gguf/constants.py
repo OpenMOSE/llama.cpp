@@ -471,6 +471,7 @@ class MODEL_TENSOR(IntEnum):
     TIME_MIX_V0          = auto()
     TIME_MIX_V1          = auto()
     TIME_MIX_V2          = auto()
+    TIME_MIX_K0          = auto() #added
     TIME_MIX_K1          = auto() #Added
     TIME_MIX_K2          = auto() #Added
     TIME_MIX_G1          = auto()
@@ -794,9 +795,9 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.TIME_MIX_V0:               "blk.{bid}.time_mix_v0",
     MODEL_TENSOR.TIME_MIX_V1:               "blk.{bid}.time_mix_v1",
     MODEL_TENSOR.TIME_MIX_V2:               "blk.{bid}.time_mix_v2",
-    MODEL_TENSOR.TIME_MIX_V0:               "blk.{bid}.time_mix_k0", #hxa079
-    MODEL_TENSOR.TIME_MIX_V1:               "blk.{bid}.time_mix_k1", #hxa079
-    MODEL_TENSOR.TIME_MIX_V2:               "blk.{bid}.time_mix_k2", #hxa079
+    MODEL_TENSOR.TIME_MIX_K0:               "blk.{bid}.time_mix_k0", #hxa079
+    MODEL_TENSOR.TIME_MIX_K1:               "blk.{bid}.time_mix_k1", #hxa079
+    MODEL_TENSOR.TIME_MIX_K2:               "blk.{bid}.time_mix_k2", #hxa079
     MODEL_TENSOR.TIME_MIX_G1:               "blk.{bid}.time_mix_g1",
     MODEL_TENSOR.TIME_MIX_G2:               "blk.{bid}.time_mix_g2",
     MODEL_TENSOR.TIME_MIX_K_K:              "blk.{bid}.time_mix_k_k",

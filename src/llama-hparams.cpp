@@ -131,7 +131,7 @@ uint32_t llama_hparams::n_embd_r() const {
 uint32_t llama_hparams::n_embd_s() const {
     if (wkv_head_size != 0) {
         // corresponds to RWKV's wkv_states size
-        return n_embd * wkv_head_size;
+        return n_head_arr[0] * wkv_head_size * wkv_head_size;
     }
 
     // corresponds to Mamba's ssm_states size

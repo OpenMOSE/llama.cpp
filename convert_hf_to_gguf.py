@@ -5282,7 +5282,7 @@ class HRwkv7MoeModel(TextModel):
 
 
         # required by llama.cpp, unused
-        self.gguf_writer.add_head_count(0)
+        #self.gguf_writer.add_head_count(0)
 
     lora_needs_transpose: bool = True
         
@@ -5306,23 +5306,23 @@ class HRwkv7MoeModel(TextModel):
                 result = result.replace(search_str, replacement)
             return result
         hxa079_list = {
-            "self_attn.w0":"attention.w0",
-            "self_attn.w1":"attention.w1",
-            "self_attn.w2":"attention.w2",
-            "self_attn.a0":"attention.a0",
-            "self_attn.a1":"attention.a1",
-            "self_attn.a2":"attention.a2",
-            "self_attn.v0":"attention.v0",
-            "self_attn.v1":"attention.v1",
-            "self_attn.v2":"attention.v2",
-            "self_attn.k0":"attention.k0",
-            "self_attn.k1":"attention.k1",
-            "self_attn.k2":"attention.k2",
+            "self_attn.w0":"attention.w0.weight",
+            "self_attn.w1":"attention.w1.weight",
+            "self_attn.w2":"attention.w2.weight",
+            "self_attn.a0":"attention.a0.weight",
+            "self_attn.a1":"attention.a1.weight",
+            "self_attn.a2":"attention.a2.weight",
+            "self_attn.v0":"attention.v0.weight",
+            "self_attn.v1":"attention.v1.weight",
+            "self_attn.v2":"attention.v2.weight",
+            "self_attn.k0":"attention.k0.weight",
+            "self_attn.k1":"attention.k1.weight",
+            "self_attn.k2":"attention.k2.weight",
 
-            "self_attn.g1":"attention.g1",
-            "self_attn.g2":"attention.g2",
+            "self_attn.g1":"attention.g1.weight",
+            "self_attn.g2":"attention.g2.weight",
 
-            "self_attn.r_k":"attention.r_k",
+            "self_attn.r_k":"attention.r_k.weight",
             "self_attn.r_norm":"self_attn.q_norm",
 
             "self_attn.receptance":"attention.receptance",

@@ -59,6 +59,7 @@ struct llama_hparams {
 
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_head_arr;
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_head_kv_arr;
+    std::array<uint32_t, LLAMA_MAX_LAYERS> n_head_kv_arr_recurrent;
     std::array<uint32_t, LLAMA_MAX_LAYERS> n_ff_arr;
 
     uint32_t n_layer_dense_lead = 0;

@@ -503,6 +503,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
     hparams.n_head_kv_arr = hparams.n_head_arr;
 
     ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, hparams.n_head_kv_arr, hparams.n_layer, false);
+    ml.get_key_or_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV_RECURRENT, hparams.n_head_kv_arr_recurrent, hparams.n_layer, false);
+
 
     bool rope_finetuned = false;
     ml.get_key(LLM_KV_ROPE_SCALING_FINETUNED, rope_finetuned, false);
@@ -1547,7 +1549,7 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_ATTENTION_VALUE_RESIDUAL_MIX_LORA_RANK, hparams.n_lora_value_res_mix);
                 ml.get_key(LLM_KV_ATTENTION_GATE_LORA_RANK,               hparams.n_lora_gate, false);
                 ml.get_key(LLM_KV_TOKEN_SHIFT_COUNT,                      hparams.token_shift_count, false);
-
+                
                 switch (hparams.n_layer) {
                     case 12:
                         switch (hparams.n_embd) {
@@ -1593,6 +1595,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 
                 ml.get_key(LLM_KV_ATTENTION_KEY_RESIDUAL_MIX_LORA_RANK,   hparams.n_lora_key_res_mix);
                 ml.get_key(LLM_KV_ATTENTION_GATE_LORA_RANK,               hparams.n_lora_gate);
+                //ml.get_key(LLM_KV_ATTENTION_HEAD_COUNT_KV,                hparams.n_head_kv_arr_recurrent);
+                hparams.wkv_head_size = 128;
                 printf("hello hrwkv!\n");
 
                 LLAMA_LOG_INFO("n_lora_value_res_mix %d: n_lora_key_res_mix %d GGUFs\n", hparams.n_lora_value_res_mix, hparams.n_lora_key_res_mix);
@@ -1601,6 +1605,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key_or_arr(LLM_KV_ATTENTION_RWKV_LAYER_PATTERN, hparams.rwkv_layers, hparams.n_layer, 1);
                 ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+
+                
 
                 for (uint32_t i = 0; i < hparams.n_layer; ++i) {
                     hparams.recurrent_layer_arr[i] = hparams.rwkv_layers[i] == 1;
@@ -4740,11 +4746,11 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
 
                     // output
                     output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
-                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab},0);
                     // if output is NULL, init from the input tok embed
-                    if (output == NULL) {
-                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
-                    }
+                    // if (output == NULL) {
+                    //     output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+                    // }
 
                     
 
@@ -4755,13 +4761,15 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     const int n_lora_gate = hparams.n_lora_gate;
                     const int attn_hidden_size = n_embd;
 
+                    const int n_kv = hparams.n_head_kv_arr_recurrent[0];
+
                     LLAMA_LOG_INFO("phase 2 n_lora_value_res_mix %d: n_lora_key_res_mix %d GGUFs\n", n_lora_value_res_mix, n_lora_key_res_mix);
                 
 
                     for (int i = 0; i < n_layer; ++i) {
                         auto & layer = layers[i];
                         bool is_rwkv_layer = hparams.is_rwkv(i);
-                        LLAMA_LOG_INFO("Layer %d: is_RWKV %d \n", i, is_rwkv_layer);
+                        //LLAMA_LOG_INFO("Layer %d: is_RWKV %d \n", i, is_rwkv_layer);
                 
                         if (is_rwkv_layer){
                             
@@ -4774,31 +4782,31 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.time_mix_a2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A2, "weight", i), {n_lora_iclr, n_embd_head_k * n_head}, 0);
                             layer.time_mix_a0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A0, "weight", i), {n_embd_head_k * n_head}, 0);
 
-                            if (i == 0) {
-                                // actually not used
+                            // if (i == 0) {
+                            //     // actually not used
+                            //     layer.time_mix_v1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V1, "weight", i), {n_embd, n_lora_value_res_mix}, 0);
+                            //     layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_value_res_mix, n_embd_head_k*n_kv}, 0);
+                            //     layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd_head_k*n_kv}, 0);
+
+                                
+                            //     layer.time_mix_k1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K1, "weight", i), {n_embd, n_lora_key_res_mix}, 0);
+                            //     layer.time_mix_k2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K2, "weight", i), {n_lora_key_res_mix, n_embd_head_k*n_kv}, 0);
+                            //     layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd_head_k*n_kv}, 0);
+
+                                
+                            // } else {
+                                
                                 layer.time_mix_v1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V1, "weight", i), {n_embd, n_lora_value_res_mix}, 0);
-                                layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_value_res_mix, n_embd_gqa}, 0);
-                                layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd_gqa}, 0);
+                                layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_value_res_mix, n_embd_head_k*n_kv}, 0);
+                                layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd_head_k*n_kv}, 0);
 
                                 
                                 layer.time_mix_k1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K1, "weight", i), {n_embd, n_lora_key_res_mix}, 0);
-                                layer.time_mix_k2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K2, "weight", i), {n_lora_key_res_mix, n_embd_gqa}, 0);
-                                layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd_gqa}, 0);
-
-                                
-                            } else {
-                                
-                                layer.time_mix_v1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V1, "weight", i), {n_embd, n_lora_value_res_mix}, 0);
-                                layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_value_res_mix, n_embd_gqa}, 0);
-                                layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd_gqa}, 0);
-
-                                
-                                layer.time_mix_k1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K1, "weight", i), {n_embd, n_lora_key_res_mix}, 0);
-                                layer.time_mix_k2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K2, "weight", i), {n_lora_key_res_mix, n_embd_gqa}, 0);
-                                layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd_gqa}, 0);
+                                layer.time_mix_k2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K2, "weight", i), {n_lora_key_res_mix, n_embd_head_k*n_kv}, 0);
+                                layer.time_mix_k0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_K0, "weight", i), {n_embd_head_k*n_kv}, 0);
                             
                             
-                            }
+                           // }
 
                             layer.time_mix_g1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G1, "weight", i), {n_embd, n_lora_gate},0);
                             layer.time_mix_g2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G2, "weight", i), {n_lora_gate, n_embd_head_k * n_head},0);
@@ -4807,17 +4815,19 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.time_mix_r_k = create_tensor(tn(LLM_TENSOR_TIME_MIX_R_K, "weight", i), {n_embd_head_k * n_head}, 0);
 
                             layer.time_mix_receptance = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
-                            layer.time_mix_key = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "weight", i), {n_embd, n_embd_gqa}, 0);
-                            layer.time_mix_value = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "weight", i), {n_embd, n_embd_gqa}, 0);
+                            layer.time_mix_key = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+                            layer.time_mix_value = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             
                             layer.time_mix_output = create_tensor(tn(LLM_TENSOR_TIME_MIX_OUTPUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
 
                         }
                         else{
                             layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
-                            layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_gqa}, 0);
-                            layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_gqa}, 0);
+                            layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+                            layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+
+                            
                         }
 
                         layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
@@ -5669,12 +5679,15 @@ void llama_model::print_info() const {
         LLAMA_LOG_INFO("%s: rope_yarn_log_mul    = %.4f\n",   __func__, hparams.rope_yarn_log_mul);
     }
 
-    if (arch == LLM_ARCH_QWEN2MOE) {
+    if (arch == LLM_ARCH_QWEN2MOE 
+        ) {
         LLAMA_LOG_INFO("%s: n_ff_exp         = %d\n",     __func__, hparams.n_ff_exp);
         LLAMA_LOG_INFO("%s: n_ff_shexp       = %d\n",     __func__, hparams.n_ff_shexp);
     }
 
-    if (arch == LLM_ARCH_QWEN3MOE) {
+    if (arch == LLM_ARCH_QWEN3MOE ||
+        arch == LLM_ARCH_HRWKV7MOE
+       ) {
         LLAMA_LOG_INFO("%s: n_ff_exp         = %d\n",     __func__, hparams.n_ff_exp);
     }
 
@@ -14352,6 +14365,7 @@ struct llm_build_rwkv7_base : public llm_graph_context {
     }
 
     ggml_tensor * build_rwkv7_time_mix(
+        
             llm_graph_input_rs * inp,
             ggml_tensor * cur,
             ggml_tensor * x_prev,
@@ -14368,6 +14382,11 @@ struct llm_build_rwkv7_base : public llm_graph_context {
         const auto n_seq_tokens = ubatch.n_seq_tokens;
 
         const auto kv_head = mctx_cur->get_head();
+
+        //LLAMA_LOG_INFO("kv_head %d\n",kv_head);
+        
+
+
 
         const auto & layer = model.layers[il];
 
@@ -14485,6 +14504,7 @@ struct llm_build_rwkv7_base : public llm_graph_context {
 
 
     ggml_tensor * build_rwkv_079_time_mix(
+            //llama_model & model,
             llm_graph_input_rs * inp,
             ggml_tensor * cur,
             ggml_tensor * inp_pos,
@@ -14494,36 +14514,20 @@ struct llm_build_rwkv7_base : public llm_graph_context {
             const llama_ubatch & ubatch,
             int   il) const {
         const auto * mctx_cur = inp->mctx;//static_cast<const llama_memory_recurrent_context *>(mctx);
+        //const auto * mctx_cur = static_cast<const llama_memory_recurrent_context *>(mctx);
 
         const auto n_tokens = ubatch.n_tokens;
         const auto n_seqs = ubatch.n_seqs;
         const auto n_embd = hparams.n_embd;
         const auto head_size = hparams.wkv_head_size;
-        const auto head_count = n_embd / head_size;
+        //const auto head_count = n_embd / head_size;
         const auto n_seq_tokens = ubatch.n_seq_tokens;
 
         const auto kv_head = mctx_cur->get_head();
-
+        const auto n_head_kv = hparams.n_head_kv_arr_recurrent[0];
         const auto & layer = model.layers[il];
 
-        //bool has_gating = layer.time_mix_g1 && layer.time_mix_g2;
-
-        ggml_tensor * x = cur;
-
-        //removed tokenshift
-
-        //ggml_tensor * sx = ggml_sub(ctx0, x_prev, cur);
-        //ggml_tensor * dummy = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, n_embd, n_seq_tokens, n_seqs, has_gating ? 6 : 5);
-        //sx = ggml_repeat(ctx0, sx, dummy);
-
-        //ggml_tensor * xxx = ggml_add(ctx0, ggml_mul(ctx0, sx, layer.time_mix_lerp_fused), cur);
-
-        // ggml_tensor * xr = ggml_view_2d(ctx0, xxx, n_embd, n_tokens, xxx->nb[1], 0);
-        // ggml_tensor * xw = ggml_view_2d(ctx0, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * sizeof(float));
-        // ggml_tensor * xk = ggml_view_2d(ctx0, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 2 * sizeof(float));
-        // ggml_tensor * xv = ggml_view_2d(ctx0, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 3 * sizeof(float));
-        // ggml_tensor * xa = ggml_view_2d(ctx0, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 4 * sizeof(float));
-        // ggml_tensor * xg = has_gating ? ggml_view_2d(ctx0, xxx, n_embd, n_tokens, xxx->nb[1], n_embd * n_tokens * 5 * sizeof(float)) : nullptr;
+        ggml_tensor * x = ggml_reshape_2d(ctx0, cur, n_embd, n_tokens);
 
         ggml_tensor * r = build_lora_mm(layer.time_mix_receptance, x);
         ggml_tensor * w = ggml_add(
@@ -14535,25 +14539,7 @@ struct llm_build_rwkv7_base : public llm_graph_context {
 
         ggml_tensor * k = build_lora_mm(layer.time_mix_key, x);
         ggml_tensor * v = build_lora_mm(layer.time_mix_value, x);
-        //print_tensor_info(r);
-        //print_tensor_info(v);
 
-        
-
-        //Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
-        //Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
-        if (n_head_kv != 0 && n_head_kv != n_head) {
-            GGML_ASSERT(n_head % n_head_kv == 0);
-            //k = ggml_reshape_4d(ctx0, k, head_size, 1, n_head_kv, n_tokens);
-            //LLAMA_LOG_INFO("head_size %d: n_head_kv %d n_tokens %d\n", head_size,n_head_kv, n_tokens);
-                
-            v = ggml_reshape_4d(ctx0, v, head_size, 1, n_head_kv, n_tokens);
-  
-        }
-
-        
-
-        
 
         r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
         k = ggml_reshape_3d(ctx0, k, head_size, n_head_kv, n_tokens);
@@ -14562,20 +14548,16 @@ struct llm_build_rwkv7_base : public llm_graph_context {
         r = build_norm(r, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
         cb(r, "Rcur_normed", il);
 
-        //LLAMA_LOG_INFO("rope_type %d n_ctx_orig %d: freq_base %lf freq_scale %lf\n",rope_type, n_ctx_orig,freq_base, freq_scale);
-             
-
         r = ggml_rope_ext(
                 ctx0, r, inp_pos, nullptr,
                 n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                 ext_factor, attn_factor, beta_fast, beta_slow
                 );
+        // print_tensor_info(r);
+        // exit(1);
 
         k = build_norm(k, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
         cb(k, "Kcur_normed", il);
-
-        //LLAMA_LOG_INFO("r rope finished\n");
-        
 
         k = ggml_rope_ext(
                 ctx0, k, inp_pos, nullptr,
@@ -14583,68 +14565,55 @@ struct llm_build_rwkv7_base : public llm_graph_context {
                 ext_factor, attn_factor, beta_fast, beta_slow
                 );
 
-        //LLAMA_LOG_INFO("k rope finished\n");
-
-        //print_tensor_info(v);
-
         
 
-        cb(r, "r", il);
-        //LLAMA_LOG_INFO("r finished\n");
-        cb(k, "k", il);
-        //LLAMA_LOG_INFO("k finished\n");
-        cb(v, "v", il);
-        //LLAMA_LOG_INFO("cb finished\n");           
-        //LLAMA_LOG_INFO("try 4d reshape [%d,1,%d,%d]\n",head_size,n_head_kv,n_tokens);
-        k = ggml_reshape_4d(ctx0, k, head_size, 1, n_head_kv, n_tokens);
-        //LLAMA_LOG_INFO("k 4d reshape finished\n");
-
-        
+        if (n_head_kv != 0 && n_head_kv != n_head) {
+            GGML_ASSERT(n_head % n_head_kv == 0);
+            v = ggml_reshape_3d(ctx0, v, head_size, n_head_kv, n_tokens);
+            k = ggml_reshape_3d(ctx0, k, head_size, n_head_kv, n_tokens);
+  
+        }
 
         if (first_layer_value == nullptr) {
             first_layer_value = v;
             first_layer_key = k;
         } else {
-            // Add the first layer value as a residual connection.
+            // Add the first layer value,key as a residual connection.
             v = ggml_add(ctx0, v,
                 ggml_mul(ctx0,
                     ggml_sub(ctx0, first_layer_value, v),
-                    ggml_reshape_4d(ctx0, 
+                    ggml_reshape_3d(ctx0, 
                         ggml_sigmoid(ctx0, ggml_add(ctx0,
                                 ggml_mul_mat(ctx0, layer.time_mix_v2, ggml_mul_mat(ctx0, layer.time_mix_v1, x)),
                                 layer.time_mix_v0
                             )
                         ),
-                        head_size, 1, n_head_kv, n_tokens
+                        head_size, n_head_kv, n_tokens
                     )
                 )
             );
             k = ggml_add(ctx0, k,
                 ggml_mul(ctx0,
                     ggml_sub(ctx0, first_layer_key, k),
-                    ggml_reshape_4d(ctx0, 
+                    ggml_reshape_3d(ctx0, 
                         ggml_sigmoid(ctx0, ggml_add(ctx0,
                                 ggml_mul_mat(ctx0, layer.time_mix_k2, ggml_mul_mat(ctx0, layer.time_mix_k1, x)),
                                 layer.time_mix_k0
                             )
                         ),
-                        head_size, 1, n_head_kv, n_tokens
+                        head_size, n_head_kv, n_tokens
                     )
                 )
             );
         }
-
-        
-
-        
-
         
         if (n_head_kv != 0 && n_head_kv != n_head) {
             ggml_tensor * tmp = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, head_size, n_head / n_head_kv, n_head_kv, n_tokens);
+            v = ggml_reshape_4d(ctx0, v, head_size,1, n_head_kv, n_tokens);
+            k = ggml_reshape_4d(ctx0, k, head_size,1, n_head_kv, n_tokens);
             k = ggml_repeat(ctx0, k, tmp);
             v = ggml_repeat(ctx0, v, tmp);
-            k = ggml_reshape_3d(ctx0, k, head_size, n_head, n_tokens);
-            v = ggml_reshape_3d(ctx0, v, head_size, n_head, n_tokens);
+            
         }
 
         
@@ -14666,6 +14635,8 @@ struct llm_build_rwkv7_base : public llm_graph_context {
         //ggml_tensor * kk = ggml_reshape_3d(ctx0, ggml_mul(ctx0, k, layer.time_mix_k_k), head_size, n_head, n_tokens);
         r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
         w = ggml_reshape_3d(ctx0, w, head_size, n_head, n_tokens);
+        k = ggml_reshape_3d(ctx0, k, head_size, n_head, n_tokens);
+        v = ggml_reshape_3d(ctx0, v, head_size, n_head, n_tokens);
         
         a = ggml_reshape_3d(ctx0, a, head_size, n_head, n_tokens);
         ggml_tensor * kk = ggml_l2_norm(ctx0, k, 1e-12);
@@ -14675,40 +14646,21 @@ struct llm_build_rwkv7_base : public llm_graph_context {
         //new k = k * (1.0 - w + a)
         // k + k * (a-w)
 
-        k = ggml_add(ctx0,
-                     k, 
-                     ggml_mul(ctx0,
-                                k,
-                                ggml_sub(ctx0,
-                                            a,
-                                            w
-                                        )
-                             )
-                                
-                    );
+        k = ggml_add(ctx0, k, ggml_mul(ctx0, k, ggml_sub(ctx0, a, w ) ));
 
 
-        // ggml_tensor * wkv_state = build_rs(
-        //         inp, mctx_cur->get_s_l(il),
-        //         hparams.n_embd_s(), n_seqs);
 
-        // (head_size*n_head) * head_size     
+        // ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+        // conv = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2*n_group*d_state, n_seqs);
 
-        //LLAMA_LOG_INFO("n_head_arr %d n_head_kv_arr %d",hparams.n_head_arr[il],hparams.n_head_kv_arr[il]);
-
-        //ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
-        
-        
         ggml_tensor * wkv_state = build_rs(
                 inp, mctx_cur->get_s_l(il),
-                uint32_t((head_size*n_head) * head_size), n_seqs);
+                hparams.n_embd_s(), n_seqs);
         //LLAMA_LOG_INFO("kv_head %d\n",kv_head);
-        //print_tensor_info(kk);
-        //exit(1);
-        // ggml_tensor * wkv_state = build_rs(
-        //         inp, mctx_cur->get_s_l(il),
-        //         hparams.n_embd_s(), n_seqs);
 
+        cb(r, "r", il);
+        cb(k, "k", il);
+        cb(v, "v", il);
         
 
         ggml_tensor * wkv_output = ggml_rwkv_wkv7(ctx0, r, w, k, v, ggml_neg(ctx0, kk), ggml_mul(ctx0, kk, a), wkv_state);
@@ -14723,14 +14675,16 @@ struct llm_build_rwkv7_base : public llm_graph_context {
                     ggml_view_1d(
                         ctx0,
                         mctx_cur->get_s_l(il),
-                        ((head_size*n_head) * head_size) * n_seqs,
-                        ((head_size*n_head) * head_size) * kv_head * ggml_element_size(mctx_cur->get_s_l(il))
+                        hparams.n_embd_s() * n_seqs,
+                        hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il))
                         )
                     )
                 );
 
      
         cur = ggml_reshape_2d(ctx0, cur, (head_size*n_head), n_tokens);
+
+
         cur = ggml_scale(ctx0, cur, 1.0f / sqrtf(float(head_size)));
 
         ggml_tensor * rk = ggml_sum_rows(ctx0,
@@ -14932,10 +14886,10 @@ struct llm_build_arwkv7 : public llm_build_rwkv7_base {
 
 struct llm_build_hrwkv7moe : public llm_build_rwkv7_base {
     llm_build_hrwkv7moe(const llama_model & model, const llm_graph_params & params) : llm_build_rwkv7_base(model,params) {
-        const int64_t n_embd_head = hparams.n_embd_head_v;
+        //const int64_t n_embd_head = hparams.n_embd_head_v;
 
-        GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
-        GGML_ASSERT(n_embd_head == hparams.n_rot);
+        //GGML_ASSERT(n_embd_head == hparams.n_embd_head_k);
+        //GGML_ASSERT(n_embd_head == hparams.n_rot);
 
         ///LLAMA_LOG_INFO("start hrwkv7moe inititialize\n");
 
@@ -14947,6 +14901,7 @@ struct llm_build_hrwkv7moe : public llm_build_rwkv7_base {
         const auto n_embd = hparams.n_embd;
         const auto n_seq_tokens = ubatch.n_seq_tokens;
         const auto n_seqs = ubatch.n_seqs;
+        const auto n_head_kv = hparams.n_head_kv_arr_recurrent[0];
 
         //auto * rs_inp = build_rs_inp();
         
@@ -14962,76 +14917,247 @@ struct llm_build_hrwkv7moe : public llm_build_rwkv7_base {
         //LLAMA_LOG_INFO("build_attn_inp_kv_unified done\n");
 
         ggml_tensor * inp_out_ids = build_inp_out_ids();
-        //LLAMA_LOG_INFO("build_inp_out_ids done\n");
+        //LLAMA_LOG_INFO("n_layer %d\n",n_layer);
+        
 
         for (int il = 0; il < n_layer; ++il) {
             //LLAMA_LOG_INFO("build process layer %d", il);
+            //inpL = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
             ggml_tensor * inpSA = inpL;
 
             // norm
-            cur = build_norm(inpL,
+            ggml_tensor * att_norm = build_norm(inpL,
                     model.layers[il].attn_norm, NULL,
                     LLM_NORM_RMS, il);
-            cb(cur, "attn_norm", il);
+            cb(att_norm, "attn_norm", il);
 
             bool IsRWKV = hparams.is_rwkv(il);
 
             
             if (IsRWKV)
             {
-                // hxa079 block
-                cur = build_rwkv_079_time_mix(
-                                        inp_hybrid->get_recr(),//llm_graph_input_rs * inp,
-                                        cur,//ggml_tensor * cur,
-                                        inp_pos,//ggml_tensor * inp_pos,
-                                        v_first,//ggml_tensor *& first_layer_value,
-                                        k_first,//ggml_tensor *& first_layer_key,
-                                        ubatch,//const llama_ubatch & ubatch,
-                                        il//int   il
-                                        );
+            
+                cur = att_norm;
+
+                
+
+                llm_graph_input_rs * inp = inp_hybrid->get_recr();
+                const auto * mctx_cur = inp->mctx;
+
+                const auto n_tokens = ubatch.n_tokens;
+                const auto n_seqs = ubatch.n_seqs;
+                const auto n_embd = hparams.n_embd;
+                const auto head_size = hparams.wkv_head_size;
+                //const auto head_count = n_embd / head_size;
+                const auto n_seq_tokens = ubatch.n_seq_tokens;
+
+                const auto kv_head = mctx_cur->get_head();
+                const auto n_head_kv = hparams.n_head_kv_arr_recurrent[0];
+                const auto & layer = model.layers[il];
+
+                ggml_tensor * x = ggml_reshape_2d(ctx0, cur, n_embd, n_tokens);
+
+                ggml_tensor * r = build_lora_mm(layer.time_mix_receptance, x);
+                ggml_tensor * w = ggml_add(
+                    ctx0,
+                    ggml_mul_mat(ctx0, layer.time_mix_w2, ggml_tanh(ctx0, ggml_mul_mat(ctx0, layer.time_mix_w1, x))),
+                    layer.time_mix_w0
+                );
+                w = ggml_exp(ctx0, ggml_scale(ctx0, ggml_sigmoid(ctx0, w), -0.606531));
+
+                ggml_tensor * k = build_lora_mm(layer.time_mix_key, x);
+                ggml_tensor * v = build_lora_mm(layer.time_mix_value, x);
+
+
+                r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
+                k = ggml_reshape_3d(ctx0, k, head_size, n_head_kv, n_tokens);
+
+
+                r = build_norm(r, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
+                cb(r, "Rcur_normed", il);
+
+                r = ggml_rope_ext(
+                        ctx0, r, inp_pos, nullptr,
+                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                        ext_factor, attn_factor, beta_fast, beta_slow
+                        );
+                // print_tensor_info(r);
+                // exit(1);
+
+                k = build_norm(k, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
+                cb(k, "Kcur_normed", il);
+
+                k = ggml_rope_ext(
+                        ctx0, k, inp_pos, nullptr,
+                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
+                        ext_factor, attn_factor, beta_fast, beta_slow
+                        );
+
+                
+
+                if (n_head_kv != 0 && n_head_kv != n_head) {
+                    GGML_ASSERT(n_head % n_head_kv == 0);
+                    v = ggml_reshape_3d(ctx0, v, head_size, n_head_kv, n_tokens);
+                    k = ggml_reshape_3d(ctx0, k, head_size, n_head_kv, n_tokens);
+        
+                }
+
+                if (il==0) {
+                    v_first = v;
+                    k_first = k;
+                } else {
+                    // Add the first layer value,key as a residual connection.
+                    v = ggml_add(ctx0, v,
+                        ggml_mul(ctx0,
+                            ggml_sub(ctx0, v_first, v),
+                            ggml_reshape_3d(ctx0, 
+                                ggml_sigmoid(ctx0, ggml_add(ctx0,
+                                        ggml_mul_mat(ctx0, layer.time_mix_v2, ggml_mul_mat(ctx0, layer.time_mix_v1, x)),
+                                        layer.time_mix_v0
+                                    )
+                                ),
+                                head_size, n_head_kv, n_tokens
+                            )
+                        )
+                    );
+                    k = ggml_add(ctx0, k,
+                        ggml_mul(ctx0,
+                            ggml_sub(ctx0, k_first, k),
+                            ggml_reshape_3d(ctx0, 
+                                ggml_sigmoid(ctx0, ggml_add(ctx0,
+                                        ggml_mul_mat(ctx0, layer.time_mix_k2, ggml_mul_mat(ctx0, layer.time_mix_k1, x)),
+                                        layer.time_mix_k0
+                                    )
+                                ),
+                                head_size, n_head_kv, n_tokens
+                            )
+                        )
+                    );
+                }
+                
+                if (n_head_kv != 0 && n_head_kv != n_head) {
+                    ggml_tensor * tmp = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, head_size, n_head / n_head_kv, n_head_kv, n_tokens);
+                    v = ggml_reshape_4d(ctx0, v, head_size,1, n_head_kv, n_tokens);
+                    k = ggml_reshape_4d(ctx0, k, head_size,1, n_head_kv, n_tokens);
+                    k = ggml_repeat(ctx0, k, tmp);
+                    v = ggml_repeat(ctx0, v, tmp);
+                    
+                }
+
+                
+
+                ggml_tensor * g = ggml_mul_mat(ctx0, layer.time_mix_g2, ggml_sigmoid(ctx0, ggml_mul_mat(ctx0, layer.time_mix_g1, x)));
+
+                ggml_tensor * a = ggml_sigmoid(ctx0,
+                    ggml_add(
+                        ctx0,
+                        ggml_mul_mat(ctx0, layer.time_mix_a2, ggml_mul_mat(ctx0, layer.time_mix_a1, x)),
+                        layer.time_mix_a0
+                    )
+                );
+
+
+
+                
+
+                //ggml_tensor * kk = ggml_reshape_3d(ctx0, ggml_mul(ctx0, k, layer.time_mix_k_k), head_size, n_head, n_tokens);
+                r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
+                w = ggml_reshape_3d(ctx0, w, head_size, n_head, n_tokens);
+                k = ggml_reshape_3d(ctx0, k, head_size, n_head, n_tokens);
+                v = ggml_reshape_3d(ctx0, v, head_size, n_head, n_tokens);
+                
+                a = ggml_reshape_3d(ctx0, a, head_size, n_head, n_tokens);
+                ggml_tensor * kk = ggml_l2_norm(ctx0, k, 1e-12);
+
+                
+                //old k = k * (1 + (a-1) * self.k_a)
+                //new k = k * (1.0 - w + a)
+                // k + k * (a-w)
+
+                k = ggml_add(ctx0, k, ggml_mul(ctx0, k, ggml_sub(ctx0, a, w ) ));
+
+
+
+                // ggml_tensor * conv = build_rs(inp, conv_states_all, hparams.n_embd_r(), n_seqs);
+                // conv = ggml_reshape_3d(ctx0, conv, d_conv - 1, d_inner + 2*n_group*d_state, n_seqs);
+
+                ggml_tensor * wkv_state = build_rs(
+                        inp, mctx_cur->get_s_l(il),
+                        hparams.n_embd_s(), n_seqs);
+                //LLAMA_LOG_INFO("kv_head %d\n",kv_head);
+
+                cb(r, "r", il);
+                cb(k, "k", il);
+                cb(v, "v", il);
+                
+
+                ggml_tensor * wkv_output = ggml_rwkv_wkv7(ctx0, r, w, k, v, ggml_neg(ctx0, kk), ggml_mul(ctx0, kk, a), wkv_state);
+                cur = ggml_view_1d(ctx0, wkv_output, (head_size*n_head) * n_tokens, 0);
+                wkv_state = ggml_view_1d(ctx0, wkv_output, (head_size*n_head) * head_size * n_seqs, (head_size*n_head) * n_tokens * sizeof(float));
+                //print_tensor_info(wkv_state);
+                ggml_build_forward_expand(
+                        gf,
+                        ggml_cpy(
+                            ctx0,
+                            wkv_state,
+                            ggml_view_1d(
+                                ctx0,
+                                mctx_cur->get_s_l(il),
+                                hparams.n_embd_s() * n_seqs,
+                                hparams.n_embd_s() * kv_head * ggml_element_size(mctx_cur->get_s_l(il))
+                                )
+                            )
+                        );
+
+            
+                cur = ggml_reshape_2d(ctx0, cur, (head_size*n_head), n_tokens);
+
+
+                cur = ggml_scale(ctx0, cur, 1.0f / sqrtf(float(head_size)));
+
+                ggml_tensor * rk = ggml_sum_rows(ctx0,
+                        ggml_mul(ctx0, ggml_mul(ctx0, k, r), ggml_reshape_2d(ctx0, layer.time_mix_r_k, head_size, n_head)));
+                cur = ggml_add(ctx0, cur, ggml_reshape_2d(ctx0, ggml_mul(ctx0, v, rk), (head_size*n_head), n_tokens));
+
+                cur = ggml_mul(ctx0, cur, g);
+
+                cur = build_lora_mm(layer.time_mix_output, cur);
+
+                cur = ggml_reshape_3d(ctx0, cur, n_embd, n_seq_tokens, n_seqs);
             }
             else
             {
+                //LLAMA_LOG_INFO("ATTN %d\n", il);
                 // self_attention
                 // compute Q and K and RoPE them
-                ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, cur);
+                const auto head_size = hparams.wkv_head_size;
+                ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, att_norm);
                 cb(Qcur, "Qcur", il);
 
-                ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, cur);
+                ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, att_norm);
                 cb(Kcur, "Kcur", il);
 
-                ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, cur);
+                ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, att_norm);
                 cb(Vcur, "Vcur", il);
 
-                Qcur = ggml_reshape_3d(ctx0, Qcur, n_embd_head, n_head,    n_tokens);
-                Kcur = ggml_reshape_3d(ctx0, Kcur, n_embd_head, n_head_kv, n_tokens);
-                Vcur = ggml_reshape_3d(ctx0, Vcur, n_embd_head, n_head_kv, n_tokens);
+                Qcur = ggml_reshape_3d(ctx0, Qcur, head_size, n_head,    n_tokens);
+                Kcur = ggml_reshape_3d(ctx0, Kcur, head_size, n_head_kv, n_tokens);
+                Vcur = ggml_reshape_3d(ctx0, Vcur, head_size, n_head_kv, n_tokens);
 
                 Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
                 cb(Qcur, "Qcur_normed", il);
-
-                Qcur = ggml_rope_ext(
-                        ctx0, Qcur, inp_pos, nullptr,
-                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                        ext_factor, attn_factor, beta_fast, beta_slow
-                        );
-
                 Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
                 cb(Kcur, "Kcur_normed", il);
-
-                Kcur = ggml_rope_ext(
-                        ctx0, Kcur, inp_pos, nullptr,
-                        n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
-                        ext_factor, attn_factor, beta_fast, beta_slow
-                        );
 
                 cb(Qcur, "Qcur", il);
                 cb(Kcur, "Kcur", il);
                 cb(Vcur, "Vcur", il);
 
                 cur = build_attn(inp_hybrid->get_attn(),
-                        model.layers[il].wo, model.layers[il].bo,
-                        Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(n_embd_head)), il);
+                        model.layers[il].wo, nullptr,
+                        Qcur, Kcur, Vcur, nullptr, nullptr, 1.0f/sqrtf(float(head_size)), il);
+                
+                //print_tensor_info(cur);
             }
 
             if (il == n_layer - 1 && inp_out_ids) {
@@ -15085,6 +15211,7 @@ struct llm_build_hrwkv7moe : public llm_build_rwkv7_base {
         cur = build_lora_mm(model.output, cur);
 
         cb(cur, "result_output", -1);
+        //ggml_set_output(cur);
         res->t_logits = cur;
 
         ggml_build_forward_expand(gf, cur);

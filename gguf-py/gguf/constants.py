@@ -126,6 +126,7 @@ class Keys:
     class Attention:
         HEAD_COUNT                   = "{arch}.attention.head_count"
         HEAD_COUNT_KV                = "{arch}.attention.head_count_kv"
+        HEAD_COUNT_KV_RECURRENT      = "{arch}.attention.head_count_kv_recurrent"
         MAX_ALIBI_BIAS               = "{arch}.attention.max_alibi_bias"
         CLAMP_KQV                    = "{arch}.attention.clamp_kqv"
         KEY_LENGTH                   = "{arch}.attention.key_length"

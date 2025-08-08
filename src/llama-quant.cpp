@@ -714,6 +714,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         if (llama_model_has_encoder(&model)) {
             n_attn_layer *= 3;
         }
+        LLAMA_LOG_INFO("n_attn_layer %d\n",n_attn_layer);
         GGML_ASSERT((qs.n_attention_wv == n_attn_layer - pruned_attention_w) && "n_attention_wv is unexpected");
     }
 
@@ -854,6 +855,9 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         quantize &= name.find("time_mix_v0.weight") == std::string::npos;
         quantize &= name.find("time_mix_v1.weight") == std::string::npos;
         quantize &= name.find("time_mix_v2.weight") == std::string::npos;
+        quantize &= name.find("time_mix_k0.weight") == std::string::npos;
+        quantize &= name.find("time_mix_k1.weight") == std::string::npos;
+        quantize &= name.find("time_mix_k2.weight") == std::string::npos;
         quantize &= name.find("time_mix_a0.weight") == std::string::npos;
         quantize &= name.find("time_mix_a1.weight") == std::string::npos;
         quantize &= name.find("time_mix_a2.weight") == std::string::npos;

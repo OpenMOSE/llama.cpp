@@ -5236,12 +5236,19 @@ class HRwkv7MoeModel(TextModel):
         transformer_layers = self.hparams.get("transformer_layers", [])
 
         rwkv_layer_pattern = []
+        rwkv_layers = []
         for i in range(int(block_count)):
             rwkv_layer_pattern.append(1)
+            rwkv_layers.append(0)
+
 
         for IsAttention in transformer_layers:
+            rwkv_layers[IsAttention] = self.hparams.get("num_key_value_heads", 4)
             rwkv_layer_pattern[IsAttention] = 0
 
+        self.gguf_writer.add_head_count_kv(rwkv_layers)
+        self.gguf_writer.add_head_count_kv_recurrent(self.hparams.get("num_key_value_heads", 4))
+        
 
         rms_norm_eps = self.hparams["rms_norm_eps"]
         intermediate_size = self.hparams["intermediate_size"]
@@ -5277,7 +5284,6 @@ class HRwkv7MoeModel(TextModel):
         self.gguf_writer.add_nope_in_transformer(nope_in_transformer)
         self.gguf_writer.add_nope_in_rwkv(nope_in_rwkv)
         self.gguf_writer.add_head_count(num_attention_heads)
-        self.gguf_writer.add_head_count_kv(num_key_value_heads)
         self.gguf_writer.add_rwkv_layer_pattern(rwkv_layer_pattern)
 
 
@@ -5315,6 +5321,7 @@ class HRwkv7MoeModel(TextModel):
             "self_attn.v0":"attention.v0.weight",
             "self_attn.v1":"attention.v1.weight",
             "self_attn.v2":"attention.v2.weight",
+
             "self_attn.k0":"attention.k0.weight",
             "self_attn.k1":"attention.k1.weight",
             "self_attn.k2":"attention.k2.weight",
@@ -5410,134 +5417,7 @@ class HRwkv7MoeModel(TextModel):
             if len(experts) > 0:
                 raise ValueError(f"Unprocessed experts: {experts}")
 
-    def modify_tensors_(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
-        #print(f'name = {name} checking bid={bid}')
-        def replace_multiple(text, replace_dict):
-            """
-            辞書に基づいて文字列内の複数の文字列を置き換える
-            
-            Args:
-                text: 対象の文字列
-                replace_dict: {検索文字列: 置換文字列}の辞書
-            
-            Returns:
-                置き換え後の文字列
-            """
-            result = text
-            for search_str, replacement in replace_dict.items():
-                result = result.replace(search_str, replacement)
-            return result
-        hxa079_list = {
-            "self_attn.w0":"attention.w0",
-            "self_attn.w1":"attention.w1",
-            "self_attn.w2":"attention.w2",
-            "self_attn.a0":"attention.a0",
-            "self_attn.a1":"attention.a1",
-            "self_attn.a2":"attention.a2",
-            "self_attn.v0":"attention.v0",
-            "self_attn.v1":"attention.v1",
-            "self_attn.v2":"attention.v2",
-            "self_attn.k0":"attention.k0",
-            "self_attn.k1":"attention.k1",
-            "self_attn.k2":"attention.k2",
-
-            "self_attn.g1":"attention.g1",
-            "self_attn.g2":"attention.g2",
-
-            "self_attn.r_k":"attention.r_k",
-            "self_attn.r_norm":"self_attn.q_norm",
-
-            "self_attn.receptance":"attention.receptance",
-            "self_attn.key":"attention.key",
-            "self_attn.value":"attention.value",
-            "self_attn.output":"attention.output",
-        }
-        
-        #from Qwen2MoE
-        # process the experts separately
-        if name.find("experts") != -1:
-            n_experts = self.hparams["num_experts"]
-            
-            assert bid is not None
-
-            if self._experts is None:
-                self._experts = [{} for _ in range(self.block_count)]
-
-            #print(self._experts)
-
-            self._experts[bid][name] = data_torch
-
-            #print(len(self._experts[bid]))
-
-            if len(self._experts[bid]) >= n_experts * 3:
-                tensors: list[tuple[str, Tensor]] = []
-
-                # merge the experts into a single 3d tensor
-                for w_name in ["down_proj", "gate_proj", "up_proj"]:
-                    datas: list[Tensor] = []
-
-                    for xid in range(n_experts):
-                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
-                        datas.append(self._experts[bid][ename])
-                        del self._experts[bid][ename]
-
-                    data_torch = torch.stack(datas, dim=0)
-
-                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
-
-                    new_name = self.map_tensor_name(merged_name)
-                    #print('small expert append')
-                    tensors.append((new_name, data_torch))
-                # print('append tensor')
-                # print(tensors)
-                # exit()
-                return tensors
-            else:
-                #print('none')
-                return []
-
-
-        print(name)
-
-        if 'head_size_record' in name or 'layer_architecture' in name:
-            print(f'{name} skipping')
-            return []
-        name = replace_multiple(name,hxa079_list)
-
-
-        data_torch = data_torch.squeeze()
-        new_name = self.map_tensor_name(name)
-
-        # if not (new_name.endswith(".weight") or new_name.endswith(".bias")):
-        #     new_name += ".weight"
-
-        if self.lora_needs_transpose and any(
-            new_name.endswith(t) for t in [
-                "time_mix_w1.weight", "time_mix_w2.weight",
-                "time_mix_a1.weight", "time_mix_a2.weight",
-                "time_mix_v1.weight", "time_mix_v2.weight",
-                "time_mix_k1.weight", "time_mix_k2.weight",
-                "time_mix_g1.weight", "time_mix_g2.weight",
-                "time_mix_g1.weight", "time_mix_g2.weight",
-                
-            ]
-        ):
-            data_torch = data_torch.transpose(0, 1)
-
-        if 'r_k' in new_name:
-            data_torch = data_torch.flatten()
-
-        yield (new_name, data_torch)
-
-
-    # def prepare_tensors(self):
-    #     super().prepare_tensors()
-
-    #     if self._experts is not None:
-    #         # flatten `list[dict[str, Tensor]]` into `list[str]`
-    #         experts = [k for d in self._experts for k in d.keys()]
-    #         if len(experts) > 0:
-    #             raise ValueError(f"Unprocessed experts: {experts}")
+ 
 
     def set_vocab(self):
         try:

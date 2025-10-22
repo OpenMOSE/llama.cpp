@@ -563,6 +563,21 @@ class TensorNameMap:
             "model.layers.{bid}.attention.query_layernorm",                   # apertus
         ),
 
+        MODEL_TENSOR.ATTN_R_NORM: (
+            "language_model.encoder.layers.{bid}.self_attention.r_layernorm",
+            "model.layers.{bid}.self_attn.r_layernorm",                       # persimmon
+            "model.layers.{bid}.self_attn.receptance_layernorm",                   # hunyuan
+            "model.layers.{bid}.attention.receptance_layernorm",                   # bailingmoe2
+            "model.layers.{bid}.self_attn.r_norm",                            # cohere olmoe chameleon olmo2
+            "layers.{bid}.self_attn.r_norm",                                  # embeddinggemma
+            "transformer.blocks.{bid}.attn.r_ln",                             # sea-lion
+            "encoder.layer.{bid}.attention.self.layer_norm_r",                # jina-bert-v2
+            "transformer.layers.{bid}.attn.r_norm",                           # openelm
+            "model.layers.layers.{bid}.mixer.r",                              # plamo2
+            "layers.{bid}.self_attn.r_norm",                                  # qwen3-embedding
+            "model.layers.{bid}.attention.receptance_layernorm",                   # apertus
+        ),
+
         MODEL_TENSOR.ATTN_K_NORM: (
             "language_model.encoder.layers.{bid}.self_attention.k_layernorm",
             "model.layers.{bid}.self_attn.k_layernorm",                       # persimmon
@@ -729,50 +744,76 @@ class TensorNameMap:
 
         MODEL_TENSOR.TIME_MIX_W0: (
             "model.layers.{bid}.attention.w0",            # rwkv7
+            "model.layers.{bid}.self_attn.w0",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_W1: (
             "rwkv.blocks.{bid}.attention.time_maa_w1",    # rwkv6
             "model.layers.{bid}.self_attn.time_maa_w1",   # rwkv6qwen2
             "model.layers.{bid}.attention.w1",            # rwkv7
+            "model.layers.{bid}.self_attn.w1",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_W2: (
             "rwkv.blocks.{bid}.attention.time_maa_w2",    # rwkv6
             "model.layers.{bid}.self_attn.time_maa_w2",   # rwkv6qwen2
             "model.layers.{bid}.attention.w2",            # rwkv7
+            "model.layers.{bid}.self_attn.w2",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_A0: (
             "model.layers.{bid}.attention.a0",            # rwkv7
+            "model.layers.{bid}.self_attn.a0",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_A1: (
             "model.layers.{bid}.attention.a1",            # rwkv7
+            "model.layers.{bid}.self_attn.a1",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_A2: (
             "model.layers.{bid}.attention.a2",            # rwkv7
+            "model.layers.{bid}.self_attn.a2",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_V0: (
             "model.layers.{bid}.attention.v0",            # rwkv7
+            "model.layers.{bid}.self_attn.v0",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_V1: (
             "model.layers.{bid}.attention.v1",            # rwkv7
+            "model.layers.{bid}.self_attn.v1",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_V2: (
             "model.layers.{bid}.attention.v2",            # rwkv7
+            "model.layers.{bid}.self_attn.v2",            # rwkv079qwen3
+        ),
+
+        MODEL_TENSOR.TIME_MIX_K0: (
+            "model.layers.{bid}.attention.k0",            # rwkv7
+            "model.layers.{bid}.self_attn.k0",            # rwkv079qwen3
+        ),
+
+        MODEL_TENSOR.TIME_MIX_K1: (
+            "model.layers.{bid}.attention.k1",            # rwkv7
+            "model.layers.{bid}.self_attn.k1",            # rwkv079qwen3
+        ),
+
+        MODEL_TENSOR.TIME_MIX_K2: (
+            "model.layers.{bid}.attention.k2",            # rwkv7
+            "model.layers.{bid}.self_attn.k2",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_G1: (
             "model.layers.{bid}.attention.g1",            # rwkv7
+            "model.layers.{bid}.self_attn.g1",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_G2: (
             "model.layers.{bid}.attention.g2",            # rwkv7
+            "model.layers.{bid}.self_attn.g2",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_K_K: (
@@ -785,6 +826,7 @@ class TensorNameMap:
 
         MODEL_TENSOR.TIME_MIX_R_K: (
             "model.layers.{bid}.attention.r_k",            # rwkv7
+            "model.layers.{bid}.self_attn.r_k",            # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_LERP_X: (
@@ -841,6 +883,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.k_proj", # rwkv6qwen2
             "model.layers.{bid}.attention.key",    # rwkv7
             "model.layers.{bid}.attention.k_proj", # rwkv7
+            "model.layers.{bid}.self_attn.key",    # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_VALUE: (
@@ -848,6 +891,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.v_proj", # rwkv6qwen2
             "model.layers.{bid}.attention.value",  # rwkv7
             "model.layers.{bid}.attention.v_proj", # rwkv7
+            "model.layers.{bid}.self_attn.value",  # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_RECEPTANCE: (
@@ -855,6 +899,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.q_proj",     # rwkv6qwen2
             "model.layers.{bid}.attention.receptance", # rwkv7
             "model.layers.{bid}.attention.r_proj",     # rwkv7
+            "model.layers.{bid}.self_attn.receptance", # rwkv079qwen3
         ),
 
         MODEL_TENSOR.TIME_MIX_GATE: (
@@ -872,6 +917,7 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.o_proj", # rwkv6qwen2
             "model.layers.{bid}.attention.output", # rwkv7
             "model.layers.{bid}.attention.o_proj", # rwkv7
+            "model.layers.{bid}.self_attn.output", # rwkv079qwen3
         ),
 
         MODEL_TENSOR.CHANNEL_MIX_LERP_K: (

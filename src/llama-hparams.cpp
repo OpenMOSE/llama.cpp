@@ -219,3 +219,10 @@ bool llama_hparams::is_masked_swa(uint32_t n_swa, llama_swa_type swa_type, llama
 
     return false;
 }
+bool llama_hparams::is_rwkv(uint32_t il) const {
+    if (il < n_layer) {
+        return rwkv_layers[il];
+    }
+
+    GGML_ABORT("fatal error");
+}

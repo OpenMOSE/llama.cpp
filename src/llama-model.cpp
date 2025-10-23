@@ -16276,22 +16276,18 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 ggml_tensor * r = build_lora_mm(layer.time_mix_receptance, x);
 
 
-                // calc w 
+                // calc decay with softplus style
 
-                // step1 matmul iwht tanh
+                // step1 matmul with tanh
                 ggml_tensor * w = ggml_add(
                     ctx0,
                     ggml_mul_mat(ctx0, layer.time_mix_w2, ggml_tanh(ctx0, ggml_mul_mat(ctx0, layer.time_mix_w1, x))),
                     layer.time_mix_w0
                 );
 
-
-                
-                //w = ggml_exp(ctx0, ggml_neg(ctx0, ggml_exp(ctx0, w)));
-                // 1) 型を f32 に（数値安定のため）
                 struct ggml_tensor * w32 = ggml_cast(ctx0, w, GGML_TYPE_F32);
 
-                // 2) logsigmoid(w_pre) - 0.5 を「オフセットなし」で： log( sigmoid(w)*exp(-0.5) )
+                // step2 logsigmoid(w_pre) - 0.5 ->  log( sigmoid(w)*exp(-0.5) )
                 const float C = 0.6065306597126334f; // exp(-0.5)
                 struct ggml_tensor * s      = ggml_sigmoid(ctx0, w32);             // σ(w)
                 struct ggml_tensor * s_c    = ggml_scale(ctx0, s, C);              // σ(w) * e^{-1/2}
@@ -16299,7 +16295,6 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 w      = ggml_cast(ctx0, w_log, w->type); 
 
                
-
 
                 ggml_tensor * k = build_lora_mm(layer.time_mix_key, x);
                 ggml_tensor * v = build_lora_mm(layer.time_mix_value, x);
@@ -16357,6 +16352,7 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                             )
                         )
                     );
+                    //k residual
                     k = ggml_add(ctx0, k,
                         ggml_mul(ctx0,
                             ggml_sub(ctx0, k_first, k),
@@ -16393,12 +16389,7 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                     )
                 );
 
-                 
 
-
-                
-
-                //ggml_tensor * kk = ggml_reshape_3d(ctx0, ggml_mul(ctx0, k, layer.time_mix_k_k), head_size, n_head, n_tokens);
                 r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
                 w = ggml_reshape_3d(ctx0, w, head_size, n_head, n_tokens);
                 k = ggml_reshape_3d(ctx0, k, head_size, n_head, n_tokens);
@@ -16408,19 +16399,11 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 ggml_tensor * kk = ggml_l2_norm(ctx0, k, 1e-12);
 
                 //old k = k * (1 + (a-1) * self.k_a)
-
-
-                //want k = k * (1.0 - w + a)
+                //new k = k * (1.0 - w + a)
                 //->  k + k * (a-w)
 
                 k = ggml_add(ctx0, k, ggml_mul(ctx0, k, ggml_sub(ctx0, a, w ) ));
                 
-
-                //w = ggml_exp(ctx0, ggml_scale(ctx0, ggml_sigmoid(ctx0, w), -0.606531));
-                //w = ggml_exp(ctx0, w);
-                //w = ggml_neg(ctx0, w);
-
-
 
                 ggml_tensor * wkv_state = build_rs(
                         inp, mctx_cur->get_s_l(il),

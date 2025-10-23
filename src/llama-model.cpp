@@ -16197,10 +16197,7 @@ struct llm_build_arwkv7 : public llm_build_rwkv7_base {
     }
 };
 
-// idk better or not
-// struct llm_build_rwkv079qwen3 : public llm_build_rwkv7_base {
-//     llm_build_rwkv079qwen3(const llama_model & model, const llm_graph_params & params) : llm_build_rwkv7_base(model,params) {
-
+//hxa079 inference code
 struct llm_build_rwkv079qwen3 : public llm_graph_context {
     llm_build_rwkv079qwen3(const llama_model & model, const llm_graph_params & params) : llm_graph_context(params) {        
 
@@ -16218,21 +16215,13 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
 
         inpL = build_inp_embd(model.tok_embd);
 
-        // inp_pos - contains the positions
         ggml_tensor * inp_pos = build_inp_pos();
-        //LLAMA_LOG_INFO("build_inp_pos done\n");
-
-        // hybrid mode
         auto * inp_hybrid = build_inp_mem_hybrid();
-        //LLAMA_LOG_INFO("build_attn_inp_kv_unified done\n");
-
         ggml_tensor * inp_out_ids = build_inp_out_ids();
-        //LLAMA_LOG_INFO("n_layer %d\n",n_layer);
         
 
         for (int il = 0; il < n_layer; ++il) {
-           // LLAMA_LOG_INFO("build process layer %d", il);
-            //inpL = ggml_reshape_3d(ctx0, inpL, n_embd, n_seq_tokens, n_seqs);
+
             ggml_tensor * inpSA = inpL;
 
             // norm
@@ -16247,12 +16236,13 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
             {
                 // Implementation RWKV079
 
-                //What is change?
+                // What is change?
 
                 // removed tokenshift
                 // removed groupnorm
                 // add k_first
                 // moved v,k, residual before expand kv
+                // changed k = k*(1-w+a)
 
 
 
@@ -16306,26 +16296,22 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
 
                 //receptance RMS norm
                 r = build_norm(r, model.layers[il].attn_r_norm, NULL, LLM_NORM_RMS, il);
-                //cb(r, "Rcur_normed", il);
+
+                //key RMS norm
+                k = build_norm(k, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
+ 
 
                 r = ggml_rope_ext(
                         ctx0, r, inp_pos, nullptr,
                         n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                         ext_factor, attn_factor, beta_fast, beta_slow
                         );
-                //print_tensor_info(r);
-               
-
-                k = build_norm(k, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
-               // cb(k, "Kcur_normed", il);
-
+            
                 k = ggml_rope_ext(
                         ctx0, k, inp_pos, nullptr,
                         n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                         ext_factor, attn_factor, beta_fast, beta_slow
                         );
-
-                
 
                 if (n_head_kv != 0 && n_head_kv != n_head) {
                     GGML_ASSERT(n_head % n_head_kv == 0);
@@ -16334,6 +16320,8 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
         
                 }
 
+                
+                // residual connection before expand tensor
                 if (il==0) {
                     v_first = v;
                     k_first = k;
@@ -16367,7 +16355,7 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                         )
                     );
                 }
-                
+               
                 if (n_head_kv != 0 && n_head_kv != n_head) {
                     ggml_tensor * tmp = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, head_size, n_head / n_head_kv, n_head_kv, n_tokens);
                     v = ggml_reshape_4d(ctx0, v, head_size,1, n_head_kv, n_tokens);
@@ -16377,7 +16365,7 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                     
                 }
 
-                
+                 
 
                 ggml_tensor * g = ggml_mul_mat(ctx0, layer.time_mix_g2, ggml_sigmoid(ctx0, ggml_mul_mat(ctx0, layer.time_mix_g1, x)));
 
@@ -16408,16 +16396,10 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 ggml_tensor * wkv_state = build_rs(
                         inp, mctx_cur->get_s_l(il),
                         hparams.n_embd_s(), n_seqs);
-                //LLAMA_LOG_INFO("kv_head %d\n",kv_head);
-
-                //cb(r, "r", il);
-               // cb(k, "k", il);
-               // cb(v, "v", il);
-                
+               
 
                 ggml_tensor * wkv_output = ggml_rwkv_wkv7(ctx0, r, w, k, v, ggml_neg(ctx0, kk), ggml_mul(ctx0, kk, a), wkv_state);
-
-
+                        
                 cur = ggml_view_1d(ctx0, wkv_output, (head_size*n_head) * n_tokens, 0);
                 wkv_state = ggml_view_1d(ctx0, wkv_output, (head_size*n_head) * head_size * n_seqs, (head_size*n_head) * n_tokens * sizeof(float));
 
@@ -16449,7 +16431,6 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
 
                 cur = build_lora_mm(layer.time_mix_output, cur);
 
-                cur = ggml_reshape_3d(ctx0, cur, n_embd, n_seq_tokens, n_seqs);
             }
             else
             {
@@ -16459,20 +16440,14 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 // self_attention
                 const auto head_size = hparams.wkv_head_size;
                 ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, att_norm);
-              //  cb(Qcur, "Qcur", il);
-
                 ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, att_norm);
-              //  cb(Kcur, "Kcur", il);
-
                 ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, att_norm);
-              //  cb(Vcur, "Vcur", il);
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, head_size, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, head_size, n_head_kv, n_tokens);
                 Vcur = ggml_reshape_3d(ctx0, Vcur, head_size, n_head_kv, n_tokens);
 
                 Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
-              //  cb(Qcur, "Qcur_normed", il);
                 Kcur = build_norm(Kcur, model.layers[il].attn_k_norm, NULL, LLM_NORM_RMS, il);
 
 
@@ -16482,10 +16457,11 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
 
               
             }
-
+            //below same qwen3 ffn code
           
  
             if (il == n_layer - 1 && inp_out_ids) {
+                //exit(1);
                 cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
                 inpSA = ggml_get_rows(ctx0, inpSA, inp_out_ids);
             }
@@ -16514,9 +16490,14 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
 
             // input for next layer
             inpL = cur;
-        }
 
-   
+            // if (il == 16){
+            //     exit(1);
+            // }
+
+            
+        }
+        
 
         cur = inpL;
 

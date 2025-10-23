@@ -872,6 +872,9 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
         quantize &= name.find("time_mix_v0.weight") == std::string::npos;
         quantize &= name.find("time_mix_v1.weight") == std::string::npos;
         quantize &= name.find("time_mix_v2.weight") == std::string::npos;
+        quantize &= name.find("time_mix_k0.weight") == std::string::npos; //added hxa079
+        quantize &= name.find("time_mix_k1.weight") == std::string::npos; //added hxa079
+        quantize &= name.find("time_mix_k2.weight") == std::string::npos; //added hxa079
         quantize &= name.find("time_mix_a0.weight") == std::string::npos;
         quantize &= name.find("time_mix_a1.weight") == std::string::npos;
         quantize &= name.find("time_mix_a2.weight") == std::string::npos;

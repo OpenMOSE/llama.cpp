@@ -16103,7 +16103,11 @@ struct llm_build_rwkv7 : public llm_build_rwkv7_base {
     }
 
 };
-
+static inline struct ggml_tensor * scalar_f32(struct ggml_context * ctx, float v) {
+    struct ggml_tensor * t = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+    ggml_set_f32_1d(t, 0, v);
+    return t; // ブロードキャストされます
+}
 
 struct llm_build_arwkv7 : public llm_build_rwkv7_base {
     llm_build_arwkv7(const llama_model & model, const llm_graph_params & params) : llm_build_rwkv7_base(model, params) {
@@ -16272,14 +16276,29 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 ggml_tensor * r = build_lora_mm(layer.time_mix_receptance, x);
 
 
-                // calc w (no change from reference)
+                // calc w 
+
+                // step1 matmul iwht tanh
                 ggml_tensor * w = ggml_add(
                     ctx0,
                     ggml_mul_mat(ctx0, layer.time_mix_w2, ggml_tanh(ctx0, ggml_mul_mat(ctx0, layer.time_mix_w1, x))),
                     layer.time_mix_w0
                 );
-                w = ggml_exp(ctx0, ggml_scale(ctx0, ggml_sigmoid(ctx0, w), -0.606531));
 
+
+                
+                //w = ggml_exp(ctx0, ggml_neg(ctx0, ggml_exp(ctx0, w)));
+                // 1) 型を f32 に（数値安定のため）
+                struct ggml_tensor * w32 = ggml_cast(ctx0, w, GGML_TYPE_F32);
+
+                // 2) logsigmoid(w_pre) - 0.5 を「オフセットなし」で： log( sigmoid(w)*exp(-0.5) )
+                const float C = 0.6065306597126334f; // exp(-0.5)
+                struct ggml_tensor * s      = ggml_sigmoid(ctx0, w32);             // σ(w)
+                struct ggml_tensor * s_c    = ggml_scale(ctx0, s, C);              // σ(w) * e^{-1/2}
+                struct ggml_tensor * w_log  = ggml_log(ctx0, s_c);                 // log(σ(w)*e^{-1/2})
+                w      = ggml_cast(ctx0, w_log, w->type); 
+
+               
 
 
                 ggml_tensor * k = build_lora_mm(layer.time_mix_key, x);
@@ -16374,6 +16393,9 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                     )
                 );
 
+                 
+
+
                 
 
                 //ggml_tensor * kk = ggml_reshape_3d(ctx0, ggml_mul(ctx0, k, layer.time_mix_k_k), head_size, n_head, n_tokens);
@@ -16385,7 +16407,6 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 a = ggml_reshape_3d(ctx0, a, head_size, n_head, n_tokens);
                 ggml_tensor * kk = ggml_l2_norm(ctx0, k, 1e-12);
 
-                
                 //old k = k * (1 + (a-1) * self.k_a)
 
 
@@ -16393,6 +16414,11 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 //->  k + k * (a-w)
 
                 k = ggml_add(ctx0, k, ggml_mul(ctx0, k, ggml_sub(ctx0, a, w ) ));
+                
+
+                //w = ggml_exp(ctx0, ggml_scale(ctx0, ggml_sigmoid(ctx0, w), -0.606531));
+                //w = ggml_exp(ctx0, w);
+                //w = ggml_neg(ctx0, w);
 
 
 
@@ -16444,9 +16470,10 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
             }
             else
             {
-                //LLAMA_LOG_INFO("ATTN %d\n", il);
+                //079 uses NoPE Attention
+
+                
                 // self_attention
-                // compute Q and K and RoPE them
                 const auto head_size = hparams.wkv_head_size;
                 ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, att_norm);
               //  cb(Qcur, "Qcur", il);

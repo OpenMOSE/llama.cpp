@@ -105,6 +105,7 @@ struct llama_hparams {
     uint32_t n_lora_gate            = 0;
 
     uint32_t n_head_kv_ = 0;
+    uint32_t n_head_att_ = 0;
 
     float    rope_attn_factor = 1.0f;
     float    rope_freq_base_train;

@@ -5410,6 +5410,7 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                     const int n_lora_gate = hparams.n_lora_gate;
                     const int attn_hidden_size = n_embd;
                     hparams.n_head_kv_ = n_head_kv;
+                    hparams.n_head_att_ = n_head;
 
                     const int n_kv = n_head_kv;
 
@@ -16211,6 +16212,7 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
         const auto n_seq_tokens = ubatch.n_seq_tokens;
         const auto n_seqs = ubatch.n_seqs;
         const auto n_head_kv = hparams.n_head_kv_;
+        const auto n_head_att = hparams.n_head_att_;
 
 
         inpL = build_inp_embd(model.tok_embd);

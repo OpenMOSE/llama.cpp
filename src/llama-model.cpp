@@ -1819,6 +1819,8 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_ATTENTION_GATE_LORA_RANK,               hparams.n_lora_gate);
                 ml.get_key(LLM_KV_ATTENTION_HEAD_COUNT_KV,                hparams.n_head_kv_);
                 ml.get_key(LLM_KV_ATTENTION_ENABLE_QK_NORM,                hparams.enable_qk_norm,true);
+
+                printf("qwknorm = %d", hparams.enable_qk_norm);
                 hparams.wkv_head_size = 128;
 
                 LLAMA_LOG_INFO("n_lora_value_res_mix %d: n_lora_key_res_mix %d GGUFs\n", hparams.n_lora_value_res_mix, hparams.n_lora_key_res_mix);
@@ -5485,6 +5487,12 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.time_mix_receptance = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
                             layer.time_mix_key = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.time_mix_value = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+
+                            // optional bias tensors
+                            layer.time_mix_key_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.time_mix_value_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.time_mix_receptance_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
+
                             
                             layer.time_mix_output = create_tensor(tn(LLM_TENSOR_TIME_MIX_OUTPUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
                             if (hparams.enable_qk_norm == true){
@@ -5498,6 +5506,11 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+                            //optional bias tensors
+                            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q, "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
+
 
                             if (hparams.enable_qk_norm == true){
                                 layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
@@ -5586,6 +5599,12 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.time_mix_value = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.time_mix_output = create_tensor(tn(LLM_TENSOR_TIME_MIX_OUTPUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
 
+                            // optional bias tensors
+                            layer.time_mix_key_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.time_mix_value_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.time_mix_receptance_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
+
+
                             if (hparams.enable_qk_norm == true){
                                 layer.attn_r_norm = create_tensor(tn(LLM_TENSOR_ATTN_R_NORM, "weight", i), {n_embd_head_k}, 0);
                                 layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
@@ -5597,6 +5616,12 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                             layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
                             layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+
+                            //optional bias tensors
+                            layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                            layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q, "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
+
 
                             if (hparams.enable_qk_norm == true){
                                 layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
@@ -16443,6 +16468,16 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 ggml_tensor * k = build_lora_mm(layer.time_mix_key, x);
                 ggml_tensor * v = build_lora_mm(layer.time_mix_value, x);
 
+                if (layer.time_mix_receptance_b) {
+                    r = ggml_add(ctx0, r, layer.time_mix_receptance_b);
+                }
+                if (layer.time_mix_key_b) {
+                    k = ggml_add(ctx0, k, layer.time_mix_key_b);
+                }
+                if (layer.time_mix_value_b) {
+                    v = ggml_add(ctx0, v, layer.time_mix_value_b);
+                }
+
 
                 //reshape -> [B*T,H,N] 
                 r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
@@ -16591,6 +16626,7 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
             else
             {
                 //079 uses NoPE Attention
+                const auto & layer = model.layers[il];
 
                 
                 // self_attention
@@ -16602,6 +16638,16 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 Qcur = ggml_reshape_3d(ctx0, Qcur, head_size, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, head_size, n_head_kv, n_tokens);
                 Vcur = ggml_reshape_3d(ctx0, Vcur, head_size, n_head_kv, n_tokens);
+
+                if (layer.wq_b) {
+                    Qcur = ggml_add(ctx0, Qcur, layer.wq_b);
+                }
+                if (layer.wk_b) {
+                    Kcur = ggml_add(ctx0, Kcur, layer.wk_b);
+                }
+                if (layer.wv_b) {
+                    Vcur = ggml_add(ctx0, Vcur, layer.wv_b);
+                }
 
                 if (hparams.enable_qk_norm == true){
                     Qcur = build_norm(Qcur, model.layers[il].attn_q_norm, NULL, LLM_NORM_RMS, il);
@@ -16771,6 +16817,16 @@ struct llm_build_rwkv079qwen3moe : public llm_graph_context {
                 ggml_tensor * k = build_lora_mm(layer.time_mix_key, x);
                 ggml_tensor * v = build_lora_mm(layer.time_mix_value, x);
 
+                if (layer.time_mix_receptance_b) {
+                    r = ggml_add(ctx0, r, layer.time_mix_receptance_b);
+                }
+                if (layer.time_mix_key_b) {
+                    k = ggml_add(ctx0, k, layer.time_mix_key_b);
+                }
+                if (layer.time_mix_value_b) {
+                    v = ggml_add(ctx0, v, layer.time_mix_value_b);
+                }
+
 
                 //reshape -> [B*T,H,N] 
                 r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
@@ -16926,6 +16982,16 @@ struct llm_build_rwkv079qwen3moe : public llm_graph_context {
                 ggml_tensor * Qcur = build_lora_mm(model.layers[il].wq, att_norm);
                 ggml_tensor * Kcur = build_lora_mm(model.layers[il].wk, att_norm);
                 ggml_tensor * Vcur = build_lora_mm(model.layers[il].wv, att_norm);
+
+                if (layer.wq_b) {
+                    Qcur = ggml_add(ctx0, Qcur, layer.wq_b);
+                }
+                if (layer.wk_b) {
+                    Kcur = ggml_add(ctx0, Kcur, layer.wk_b);
+                }
+                if (layer.wv_b) {
+                    Vcur = ggml_add(ctx0, Vcur, layer.wv_b);
+                }
 
                 Qcur = ggml_reshape_3d(ctx0, Qcur, head_size, n_head,    n_tokens);
                 Kcur = ggml_reshape_3d(ctx0, Kcur, head_size, n_head_kv, n_tokens);

@@ -103,6 +103,7 @@ struct llama_hparams {
     uint32_t n_lora_value_res_mix   = 0;
     uint32_t n_lora_key_res_mix     = 0; //hxa079
     uint32_t n_lora_gate            = 0;
+    bool     enable_qk_norm = true; //hxa079
 
     uint32_t n_head_kv_ = 0;
     uint32_t n_head_att_ = 0;

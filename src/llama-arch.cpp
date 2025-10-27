@@ -79,6 +79,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_RWKV7,            "rwkv7"            },
     { LLM_ARCH_ARWKV7,           "arwkv7"           },
     { LLM_ARCH_RWKV079QWEN3,     "rwkv079qwen3"     },
+    { LLM_ARCH_RWKV079QWEN3MOE,  "rwkv079qwen3_moe" },
     { LLM_ARCH_GRANITE,          "granite"          },
     { LLM_ARCH_GRANITE_MOE,      "granitemoe"       },
     { LLM_ARCH_GRANITE_HYBRID,   "granitehybrid"    },
@@ -175,11 +176,12 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_ATTENTION_CAUSAL,                       "%s.attention.causal"                       },
     { LLM_KV_ATTENTION_Q_LORA_RANK,                  "%s.attention.q_lora_rank"                  },
     { LLM_KV_ATTENTION_KV_LORA_RANK,                 "%s.attention.kv_lora_rank"                 },
+    { LLM_KV_ATTENTION_ENABLE_QK_NORM,               "%s.attention.enable_qk_norm"               },
     { LLM_KV_ATTENTION_DECAY_LORA_RANK,              "%s.attention.decay_lora_rank"              },
     { LLM_KV_ATTENTION_ICLR_LORA_RANK,               "%s.attention.iclr_lora_rank"               },
     { LLM_KV_ATTENTION_VALUE_RESIDUAL_MIX_LORA_RANK, "%s.attention.value_residual_mix_lora_rank" },
-    { LLM_KV_ATTENTION_KEY_RESIDUAL_MIX_LORA_RANK,   "%s.attention.key_residual_mix_lora_rank" },
-    { LLM_KV_ATTENTION_RWKV_LAYER_PATTERN,           "%s.attention.rwkv_layers"           },
+    { LLM_KV_ATTENTION_KEY_RESIDUAL_MIX_LORA_RANK,   "%s.attention.key_residual_mix_lora_rank"   },
+    { LLM_KV_ATTENTION_RWKV_LAYER_PATTERN,           "%s.attention.rwkv_layers"                  },
     { LLM_KV_ATTENTION_GATE_LORA_RANK,               "%s.attention.gate_lora_rank"               },
     { LLM_KV_ATTENTION_RELATIVE_BUCKETS_COUNT,       "%s.attention.relative_buckets_count"       },
     { LLM_KV_ATTENTION_SLIDING_WINDOW,               "%s.attention.sliding_window"               },
@@ -1846,10 +1848,57 @@ static const std::map<llm_arch, std::map<llm_tensor, const char *>> LLM_TENSOR_N
             { LLM_TENSOR_ATTN_K_NORM,        "blk.%d.attn_k_norm" },
             { LLM_TENSOR_ATTN_V,             "blk.%d.attn_v" },
             { LLM_TENSOR_ATTN_OUT,           "blk.%d.attn_output" },
+
+            //FFN
             { LLM_TENSOR_FFN_NORM,                  "blk.%d.ffn_norm" },
             { LLM_TENSOR_FFN_GATE,                  "blk.%d.ffn_gate" },
             { LLM_TENSOR_FFN_DOWN,                  "blk.%d.ffn_down" },
             { LLM_TENSOR_FFN_UP,                    "blk.%d.ffn_up"},
+        },
+    },
+    {
+        LLM_ARCH_RWKV079QWEN3MOE,
+        {
+            //RWKV hxa079 block
+            { LLM_TENSOR_TIME_MIX_W0,               "blk.%d.time_mix_w0" },
+            { LLM_TENSOR_TIME_MIX_W1,               "blk.%d.time_mix_w1" },
+            { LLM_TENSOR_TIME_MIX_W2,               "blk.%d.time_mix_w2" },
+            { LLM_TENSOR_TIME_MIX_A0,               "blk.%d.time_mix_a0" },
+            { LLM_TENSOR_TIME_MIX_A1,               "blk.%d.time_mix_a1" },
+            { LLM_TENSOR_TIME_MIX_A2,               "blk.%d.time_mix_a2" },
+            { LLM_TENSOR_TIME_MIX_V0,               "blk.%d.time_mix_v0" },
+            { LLM_TENSOR_TIME_MIX_V1,               "blk.%d.time_mix_v1" },
+            { LLM_TENSOR_TIME_MIX_V2,               "blk.%d.time_mix_v2" },
+            { LLM_TENSOR_TIME_MIX_K0,               "blk.%d.time_mix_k0" },
+            { LLM_TENSOR_TIME_MIX_K1,               "blk.%d.time_mix_k1" },
+            { LLM_TENSOR_TIME_MIX_K2,               "blk.%d.time_mix_k2" },
+            { LLM_TENSOR_TIME_MIX_G1,               "blk.%d.time_mix_g1" },
+            { LLM_TENSOR_TIME_MIX_G2,               "blk.%d.time_mix_g2" },
+            { LLM_TENSOR_TIME_MIX_R_K,              "blk.%d.time_mix_r_k" },
+            { LLM_TENSOR_TIME_MIX_KEY,              "blk.%d.time_mix_key" },
+            { LLM_TENSOR_TIME_MIX_VALUE,            "blk.%d.time_mix_value" },
+            { LLM_TENSOR_TIME_MIX_RECEPTANCE,       "blk.%d.time_mix_receptance" },
+            { LLM_TENSOR_ATTN_R_NORM,                "blk.%d.attn_r_norm" },
+            { LLM_TENSOR_TIME_MIX_OUTPUT,           "blk.%d.time_mix_output" },
+
+            //Attention block
+            { LLM_TENSOR_TOKEN_EMBD,         "token_embd" },
+            { LLM_TENSOR_OUTPUT_NORM,        "output_norm" },
+            { LLM_TENSOR_OUTPUT,             "output" },
+            { LLM_TENSOR_ATTN_NORM,          "blk.%d.attn_norm" },
+            { LLM_TENSOR_ATTN_Q,             "blk.%d.attn_q" },
+            { LLM_TENSOR_ATTN_Q_NORM,        "blk.%d.attn_q_norm" },
+            { LLM_TENSOR_ATTN_K,             "blk.%d.attn_k" },
+            { LLM_TENSOR_ATTN_K_NORM,        "blk.%d.attn_k_norm" },
+            { LLM_TENSOR_ATTN_V,             "blk.%d.attn_v" },
+            { LLM_TENSOR_ATTN_OUT,           "blk.%d.attn_output" },
+
+            //ffn
+            { LLM_TENSOR_FFN_NORM,           "blk.%d.ffn_norm" },
+            { LLM_TENSOR_FFN_GATE_INP,       "blk.%d.ffn_gate_inp" },
+            { LLM_TENSOR_FFN_GATE_EXPS,      "blk.%d.ffn_gate_exps" },
+            { LLM_TENSOR_FFN_DOWN_EXPS,      "blk.%d.ffn_down_exps" },
+            { LLM_TENSOR_FFN_UP_EXPS,        "blk.%d.ffn_up_exps" },
         },
     },
     {
@@ -2621,6 +2670,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_LFM2MOE:
         case LLM_ARCH_NEMOTRON_H:
         case LLM_ARCH_RWKV079QWEN3:
+        case LLM_ARCH_RWKV079QWEN3MOE:
             return true;
         default:
             return false;

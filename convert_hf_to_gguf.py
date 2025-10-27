@@ -5782,9 +5782,6 @@ class ARwkv7Model(Rwkv7Model):
         # required by llama.cpp, unused
         self.gguf_writer.add_head_count(0)
 
-# Test Implementation HRWKV hxa079 architecture OpenMOSE
-
-# I believe NoPE is all we need :)
 
 @ModelBase.register("RWKV079Qwen3ForCausalLM") 
 class RWKV079Qwen3Model(TextModel):
@@ -5877,16 +5874,6 @@ class RWKV079Qwen3Model(TextModel):
 
     def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
         def replace_multiple(text, replace_dict):
-            """
-            辞書に基づいて文字列内の複数の文字列を置き換える
-            
-            Args:
-                text: 対象の文字列
-                replace_dict: {検索文字列: 置換文字列}の辞書
-            
-            Returns:
-                置き換え後の文字列
-            """
             result = text
             for search_str, replacement in replace_dict.items():
                 result = result.replace(search_str, replacement)
@@ -5971,7 +5958,217 @@ class RWKV079Qwen3Model(TextModel):
             self._set_vocab_sentencepiece()
         except FileNotFoundError:
             self._set_vocab_gpt2()
+            
 
+@ModelBase.register("RWKV079Qwen3MoEForCausalLM") 
+class RWKV079Qwen3MoEModel(TextModel):
+    model_arch = gguf.MODEL_ARCH.RWKV079QWEN3MOE
+
+    def set_gguf_parameters(self):
+        super().set_gguf_parameters()
+
+        if (n_experts := self.hparams.get("num_experts")) is not None:
+            self.gguf_writer.add_expert_count(n_experts)
+        if (moe_intermediate_size := self.hparams.get("moe_intermediate_size")) is not None:
+            self.gguf_writer.add_expert_feed_forward_length(moe_intermediate_size)
+            logger.info(f"gguf: expert feed forward length = {moe_intermediate_size}")
+        if (shared_expert_intermediate_size := self.hparams.get('shared_expert_intermediate_size')) is not None:
+            self.gguf_writer.add_expert_shared_feed_forward_length(shared_expert_intermediate_size)
+            logger.info(f"gguf: expert shared feed forward length = {shared_expert_intermediate_size}")
+
+
+        rope_scaling = self.hparams.get("rope_scaling") or {}
+
+        
+        block_count = self.hparams["num_hidden_layers"]
+        hidden_size = self.hparams["hidden_size"]
+        num_attention_heads = self.hparams["num_attention_heads"]
+        num_key_value_heads = self.hparams["num_key_value_heads"]
+        head_size = self.hparams.get("head_dim",hidden_size // num_attention_heads) #some model(qwen4b qwen30ba3b) have interpolated projection layer
+        max_ctxlen = self.hparams.get("max_position_embeddings",1048576) #Actually can inference infinite ctx. because i use NoPE GQA
+        architecture_revision = self.hparams.get("rwkv_architecture","hxa079") #hxa079
+        enable_qk_norm =self.hparams.get("enable_qk_norm", False) #for support qwen3
+        nope_in_transformer = self.hparams.get("nope_in_transformer", True)
+        nope_in_rwkv = self.hparams.get("nope_in_rwkv", False)
+
+        transformer_layers = self.hparams.get("transformer_layers", [])
+
+        rwkv_layer_pattern = []
+        rwkv_layers = []
+        for i in range(int(block_count)):
+            rwkv_layer_pattern.append(1)
+            rwkv_layers.append(0)
+
+
+        for IsAttention in transformer_layers:
+            #rwkv_layers[IsAttention] = self.hparams.get("num_key_value_heads", 4)
+            rwkv_layer_pattern[IsAttention] = 0
+
+       # self.gguf_writer.add_head_count_kv(rwkv_layers)
+        # RWKV079QWEN3 use grouped key/value like GQA
+        self.gguf_writer.add_head_count_kv(num_key_value_heads)
+
+        rms_norm_eps = self.hparams["rms_norm_eps"]
+        intermediate_size = self.hparams["intermediate_size"]
+        #wkv_has_gate = self.hparams["wkv_has_gate"]
+
+        # ICLR: In-Context-Learning-Rate
+        # in hxa079, I added Layer0 Key residual connection
+        lora_rank_decay = self.hparams["lora_rank_decay"]
+        lora_rank_iclr = self.hparams["lora_rank_iclr"]
+        lora_rank_value_residual_mix = self.hparams["lora_rank_value_residual_mix"]
+        lora_rank_key_residual_mix = self.hparams["lora_rank_key_residual_mix"]
+        lora_rank_gate = self.hparams["lora_rank_gate"]
+
+        # RWKV isn't context limited
+        self.gguf_writer.add_context_length(max_ctxlen)
+        self.gguf_writer.add_embedding_length(hidden_size)
+        self.gguf_writer.add_block_count(block_count)
+        self.gguf_writer.add_layer_norm_rms_eps(rms_norm_eps)
+        self.gguf_writer.add_wkv_head_size(head_size)
+        self.gguf_writer.add_decay_lora_rank(lora_rank_decay)
+        self.gguf_writer.add_iclr_lora_rank(lora_rank_iclr)
+        self.gguf_writer.add_value_residual_mix_lora_rank(lora_rank_value_residual_mix)
+        self.gguf_writer.add_key_residual_mix_lora_rank(lora_rank_key_residual_mix)
+
+        self.gguf_writer.add_gate_lora_rank(lora_rank_gate)
+        self.gguf_writer.add_feed_forward_length(intermediate_size)
+        self.gguf_writer.add_file_type(self.ftype)
+        #self.gguf_writer.add_token_shift_count(1)  I dont use tokenshift
+
+        #Added
+        #self.gguf_writer.add_architecture_revision(architecture_revision)
+        self.gguf_writer.add_enable_qk_norm(enable_qk_norm)
+        self.gguf_writer.add_nope_in_transformer(nope_in_transformer)
+        self.gguf_writer.add_nope_in_rwkv(nope_in_rwkv)
+        self.gguf_writer.add_head_count(num_attention_heads)
+        self.gguf_writer.add_rwkv_layer_pattern(rwkv_layer_pattern)
+
+
+        # required by llama.cpp, unused
+        #self.gguf_writer.add_head_count(0)
+
+    lora_needs_transpose: bool = True
+        
+
+    _experts: list[dict[str, Tensor]] | None = None
+
+    def modify_tensors(self, data_torch: Tensor, name: str, bid: int | None) -> Iterable[tuple[str, Tensor]]:
+        def replace_multiple(text, replace_dict):
+            result = text
+            for search_str, replacement in replace_dict.items():
+                result = result.replace(search_str, replacement)
+            return result
+        
+        hxa079_list = {
+            "self_attn.w0":"self_attn.w0.weight",
+            "self_attn.w1":"self_attn.w1.weight",
+            "self_attn.w2":"self_attn.w2.weight",
+            "self_attn.a0":"self_attn.a0.weight",
+            "self_attn.a1":"self_attn.a1.weight",
+            "self_attn.a2":"self_attn.a2.weight",
+            "self_attn.v0":"self_attn.v0.weight",
+            "self_attn.v1":"self_attn.v1.weight",
+            "self_attn.v2":"self_attn.v2.weight",
+
+            "self_attn.k0":"self_attn.k0.weight",
+            "self_attn.k1":"self_attn.k1.weight",
+            "self_attn.k2":"self_attn.k2.weight",
+
+            "self_attn.g1":"self_attn.g1.weight",
+            "self_attn.g2":"self_attn.g2.weight",
+
+            "self_attn.r_k":"self_attn.r_k.weight",
+            "self_attn.r_norm":"self_attn.r_norm",
+
+            "self_attn.receptance":"self_attn.receptance",
+            "self_attn.key":"self_attn.key",
+            "self_attn.value":"self_attn.value",
+            "self_attn.output":"self_attn.output",
+        }
+
+        if name.find("experts") != -1:
+            n_experts = self.hparams["num_experts"]
+            assert bid is not None
+
+            if self._experts is None:
+                self._experts = [{} for _ in range(self.block_count)]
+
+            self._experts[bid][name] = data_torch
+
+            if len(self._experts[bid]) >= n_experts * 3:
+                tensors: list[tuple[str, Tensor]] = []
+
+                # merge the experts into a single 3d tensor
+                for w_name in ["down_proj", "gate_proj", "up_proj"]:
+                    datas: list[Tensor] = []
+
+                    for xid in range(n_experts):
+                        ename = f"model.layers.{bid}.mlp.experts.{xid}.{w_name}.weight"
+                        datas.append(self._experts[bid][ename])
+                        del self._experts[bid][ename]
+
+                    data_torch = torch.stack(datas, dim=0)
+
+                    merged_name = f"model.layers.{bid}.mlp.experts.{w_name}.weight"
+
+                    new_name = self.map_tensor_name(merged_name)
+
+                    tensors.append((new_name, data_torch))
+                return tensors
+            else:
+                return []
+ 
+        
+        #return [(self.map_tensor_name(name), data_torch)]
+        if 'head_size_record' in name or 'layer_architecture' in name:
+            print(f'{name} skipping')
+            return []
+        name = replace_multiple(name,hxa079_list)
+
+        print(f'checking = {name}')
+        
+
+        data_torch = data_torch.squeeze()
+        new_name = self.map_tensor_name(name)
+        print(f'newname = {new_name}')
+
+
+        if self.lora_needs_transpose and any(
+            new_name.endswith(t) for t in [
+                "time_mix_w1.weight", "time_mix_w2.weight",
+                "time_mix_a1.weight", "time_mix_a2.weight",
+                "time_mix_v1.weight", "time_mix_v2.weight",
+                "time_mix_k1.weight", "time_mix_k2.weight",
+                "time_mix_g1.weight", "time_mix_g2.weight",
+                "time_mix_g1.weight", "time_mix_g2.weight",
+                
+            ]
+        ):
+            data_torch = data_torch.transpose(0, 1)
+
+        if 'r_k' in new_name:
+            data_torch = data_torch.flatten()
+
+
+        return [(self.map_tensor_name(name), data_torch)]
+
+    def prepare_tensors(self):
+        super().prepare_tensors()
+
+        if self._experts is not None:
+            # flatten `list[dict[str, Tensor]]` into `list[str]`
+            experts = [k for d in self._experts for k in d.keys()]
+            if len(experts) > 0:
+                raise ValueError(f"Unprocessed experts: {experts}")
+
+ 
+
+    def set_vocab(self):
+        try:
+            self._set_vocab_sentencepiece()
+        except FileNotFoundError:
+            self._set_vocab_gpt2()
 
 @ModelBase.register("MambaForCausalLM", "MambaLMHeadModel", "FalconMambaForCausalLM")
 class MambaModel(TextModel):

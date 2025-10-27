@@ -376,6 +376,7 @@ class MODEL_ARCH(IntEnum):
     RWKV7            = auto()
     ARWKV7           = auto()
     RWKV079QWEN3     = auto() #Added
+    RWKV079QWEN3MOE  = auto() #Added
     MAMBA            = auto()
     MAMBA2           = auto()
     JAMBA            = auto()
@@ -726,6 +727,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.RWKV7:            "rwkv7",
     MODEL_ARCH.ARWKV7:           "arwkv7",
     MODEL_ARCH.RWKV079QWEN3:     "rwkv079qwen3", #Added
+    MODEL_ARCH.RWKV079QWEN3MOE:  "rwkv079qwen3_moe", #Added
     MODEL_ARCH.MAMBA:            "mamba",
     MODEL_ARCH.MAMBA2:           "mamba2",
     MODEL_ARCH.JAMBA:            "jamba",
@@ -1956,6 +1958,53 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_GATE,
         MODEL_TENSOR.FFN_DOWN,
         MODEL_TENSOR.FFN_UP,
+
+        #RWKV Block
+        #MODEL_TENSOR.TIME_MIX_LERP_FUSED, removed
+        MODEL_TENSOR.TIME_MIX_W0,
+        MODEL_TENSOR.TIME_MIX_W1,
+        MODEL_TENSOR.TIME_MIX_W2,
+        MODEL_TENSOR.TIME_MIX_A0,
+        MODEL_TENSOR.TIME_MIX_A1,
+        MODEL_TENSOR.TIME_MIX_A2,
+        MODEL_TENSOR.TIME_MIX_V0,
+        MODEL_TENSOR.TIME_MIX_V1,
+        MODEL_TENSOR.TIME_MIX_V2,
+        MODEL_TENSOR.TIME_MIX_K0, #added hxa079
+        MODEL_TENSOR.TIME_MIX_K1, #added hxa079
+        MODEL_TENSOR.TIME_MIX_K2, #added hxa079
+        MODEL_TENSOR.TIME_MIX_G1,
+        MODEL_TENSOR.TIME_MIX_G2,
+        #MODEL_TENSOR.TIME_MIX_K_K, removed 
+        #MODEL_TENSOR.TIME_MIX_K_A, removed
+        MODEL_TENSOR.TIME_MIX_R_K,
+        MODEL_TENSOR.TIME_MIX_KEY,
+        MODEL_TENSOR.TIME_MIX_VALUE,
+        MODEL_TENSOR.TIME_MIX_RECEPTANCE,
+        MODEL_TENSOR.ATTN_R_NORM,
+        #MODEL_TENSOR.TIME_MIX_LN, removed GroupNorm
+        MODEL_TENSOR.TIME_MIX_OUTPUT,
+    ],
+    MODEL_ARCH.RWKV079QWEN3MOE: [
+        #from Qwen3 Dense
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+
+
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
 
         #RWKV Block
         #MODEL_TENSOR.TIME_MIX_LERP_FUSED, removed

@@ -16975,7 +16975,7 @@ struct llm_build_rwkv079qwen3moe : public llm_graph_context {
             else
             {
                 //079 uses NoPE Attention
-
+                const auto & layer = model.layers[il];
                 
                 // self_attention
                 const auto head_size = hparams.wkv_head_size;

@@ -16966,6 +16966,7 @@ struct llm_build_rwkv079qwen3moe : public llm_graph_context {
                             )
                         );
 
+
             
                 cur = ggml_reshape_2d(ctx0, cur, (head_size*n_head), n_tokens);
 

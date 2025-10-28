@@ -3,7 +3,7 @@
 #extension GL_EXT_control_flow_attributes : require
 
 // RWKV079 only support
-#define BLOCK_SIZE 128
+#define BLOCK_SIZE 64
 layout(local_size_x = BLOCK_SIZE, local_size_y = 1, local_size_z = 1) in;
 
 layout(push_constant) uniform Parameters {

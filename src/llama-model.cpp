@@ -16587,6 +16587,11 @@ struct llm_build_rwkv079qwen3 : public llm_graph_context {
                 ggml_tensor * wkv_state = build_rs(
                         inp, mctx_cur->get_s_l(il),
                         hparams.n_embd_s(), n_seqs);
+
+                //currently need fp32
+                w32   = ggml_cast(ctx0, w, GGML_TYPE_F32);
+                ggml_tensor * w_exp = ggml_exp(ctx0, ggml_neg(ctx0, ggml_exp(ctx0, w32)));
+                w     = ggml_cast(ctx0, w_exp, w->type);
                
 
                 ggml_tensor * wkv_output = ggml_rwkv_wkv7(ctx0, r, w, k, v, ggml_neg(ctx0, kk), ggml_mul(ctx0, kk, a), wkv_state);
@@ -16936,6 +16941,10 @@ struct llm_build_rwkv079qwen3moe : public llm_graph_context {
                 ggml_tensor * wkv_state = build_rs(
                         inp, mctx_cur->get_s_l(il),
                         hparams.n_embd_s(), n_seqs);
+                //currently need fp32
+                w32   = ggml_cast(ctx0, w, GGML_TYPE_F32);
+                ggml_tensor * w_exp = ggml_exp(ctx0, ggml_neg(ctx0, ggml_exp(ctx0, w32)));
+                w     = ggml_cast(ctx0, w_exp, w->type);
                
 
                 ggml_tensor * wkv_output = ggml_rwkv_wkv7(ctx0, r, w, k, v, ggml_neg(ctx0, kk), ggml_mul(ctx0, kk, a), wkv_state);

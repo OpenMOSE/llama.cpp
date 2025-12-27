@@ -144,7 +144,8 @@ uint32_t llama_hparams::n_embd_r() const {
 uint32_t llama_hparams::n_embd_s() const {
     if (wkv_head_size != 0) {
         // corresponds to RWKV's wkv_states size
-        return n_embd * wkv_head_size;
+        //return n_embd * wkv_head_size;
+        return n_head_att_ * wkv_head_size * wkv_head_size;
     }
 
     // corresponds to Mamba's ssm_states size
@@ -234,4 +235,13 @@ bool llama_hparams::is_masked_swa(uint32_t n_swa, llama_swa_type swa_type, llama
 
 bool llama_hparams::use_mrope() const {
     return rope_sections[0] > 0 && rope_sections[1] > 0;
+}
+
+
+bool llama_hparams::is_rwkv(uint32_t il) const {
+    if (il < n_layer) {
+        return rwkv_layers[il];
+    }
+
+    GGML_ABORT("fatal error");
 }

@@ -165,6 +165,7 @@ class Keys:
         DECAY_LORA_RANK              = "{arch}.attention.decay_lora_rank"
         ICLR_LORA_RANK               = "{arch}.attention.iclr_lora_rank"
         VALUE_RESIDUAL_MIX_LORA_RANK = "{arch}.attention.value_residual_mix_lora_rank"
+        KEY_RESIDUAL_MIX_LORA_RANK   = "{arch}.attention.key_residual_mix_lora_rank"
         GATE_LORA_RANK               = "{arch}.attention.gate_lora_rank"
         REL_BUCKETS_COUNT            = "{arch}.attention.relative_buckets_count"
         SLIDING_WINDOW               = "{arch}.attention.sliding_window"
@@ -176,6 +177,10 @@ class Keys:
         SHARED_KV_LAYERS             = "{arch}.attention.shared_kv_layers"
         SLIDING_WINDOW_PATTERN       = "{arch}.attention.sliding_window_pattern"
         TEMPERATURE_SCALE            = "{arch}.attention.temperature_scale"
+        RWKV_LAYER_PATTERN           = "{arch}.attention.rwkv_layers" #added
+        ENABLE_QK_NORM               = "{arch}.attention.enable_qk_norm" # added
+        NOPE_IN_TRANSFORMER          = "{arch}.attention.nope_in_transformer" # added
+        NOPE_IN_RWKV                 = "{arch}.attention.nope_in_rwkv" # added
 
     class Rope:
         DIMENSION_COUNT          = "{arch}.rope.dimension_count"
@@ -392,6 +397,8 @@ class MODEL_ARCH(IntEnum):
     RWKV6QWEN2       = auto()
     RWKV7            = auto()
     ARWKV7           = auto()
+    RWKV07D          = auto() #Added
+    RWKV07DMOE       = auto() #Added
     MAMBA            = auto()
     MAMBA2           = auto()
     JAMBA            = auto()
@@ -510,6 +517,7 @@ class MODEL_TENSOR(IntEnum):
     FFN_UP_CHEXP         = auto()
     FFN_EXP_PROBS_B      = auto()
     ATTN_Q_NORM          = auto()
+    ATTN_R_NORM          = auto()
     ATTN_K_NORM          = auto()
     LAYER_OUT_NORM       = auto()
     PER_LAYER_TOKEN_EMBD = auto() # gemma3n
@@ -549,6 +557,9 @@ class MODEL_TENSOR(IntEnum):
     TIME_MIX_V0          = auto()
     TIME_MIX_V1          = auto()
     TIME_MIX_V2          = auto()
+    TIME_MIX_K0          = auto()
+    TIME_MIX_K1          = auto()
+    TIME_MIX_K2          = auto()
     TIME_MIX_G1          = auto()
     TIME_MIX_G2          = auto()
     TIME_MIX_K_K         = auto()
@@ -788,6 +799,8 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.RWKV6QWEN2:       "rwkv6qwen2",
     MODEL_ARCH.RWKV7:            "rwkv7",
     MODEL_ARCH.ARWKV7:           "arwkv7",
+    MODEL_ARCH.RWKV07D:         "rwkv07d", #Added
+    MODEL_ARCH.RWKV07DMOE:       "rwkv07d_moe", #Added
     MODEL_ARCH.MAMBA:            "mamba",
     MODEL_ARCH.MAMBA2:           "mamba2",
     MODEL_ARCH.JAMBA:            "jamba",
@@ -883,6 +896,7 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.ATTN_SINKS:                "blk.{bid}.attn_sinks",
     MODEL_TENSOR.ATTN_GATE:                 "blk.{bid}.attn_gate",
     MODEL_TENSOR.ATTN_Q_NORM:               "blk.{bid}.attn_q_norm",
+    MODEL_TENSOR.ATTN_R_NORM:               "blk.{bid}.attn_r_norm",
     MODEL_TENSOR.ATTN_K_NORM:               "blk.{bid}.attn_k_norm",
     MODEL_TENSOR.ATTN_OUT_NORM:             "blk.{bid}.attn_output_norm",
     MODEL_TENSOR.ATTN_POST_NORM:            "blk.{bid}.post_attention_norm",
@@ -944,6 +958,9 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.TIME_MIX_V0:               "blk.{bid}.time_mix_v0",
     MODEL_TENSOR.TIME_MIX_V1:               "blk.{bid}.time_mix_v1",
     MODEL_TENSOR.TIME_MIX_V2:               "blk.{bid}.time_mix_v2",
+    MODEL_TENSOR.TIME_MIX_K0:               "blk.{bid}.time_mix_k0",
+    MODEL_TENSOR.TIME_MIX_K1:               "blk.{bid}.time_mix_k1",
+    MODEL_TENSOR.TIME_MIX_K2:               "blk.{bid}.time_mix_k2",
     MODEL_TENSOR.TIME_MIX_G1:               "blk.{bid}.time_mix_g1",
     MODEL_TENSOR.TIME_MIX_G2:               "blk.{bid}.time_mix_g2",
     MODEL_TENSOR.TIME_MIX_K_K:              "blk.{bid}.time_mix_k_k",
@@ -2146,6 +2163,97 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.FFN_GATE,
         MODEL_TENSOR.FFN_DOWN,
         MODEL_TENSOR.FFN_UP,
+    ],
+    MODEL_ARCH.RWKV07D: [
+        #from Qwen3 Dense
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+
+        #RWKV Block
+        #MODEL_TENSOR.TIME_MIX_LERP_FUSED, removed
+        MODEL_TENSOR.TIME_MIX_W0,
+        MODEL_TENSOR.TIME_MIX_W1,
+        MODEL_TENSOR.TIME_MIX_W2,
+        MODEL_TENSOR.TIME_MIX_A0,
+        MODEL_TENSOR.TIME_MIX_A1,
+        MODEL_TENSOR.TIME_MIX_A2,
+        MODEL_TENSOR.TIME_MIX_V0,
+        MODEL_TENSOR.TIME_MIX_V1,
+        MODEL_TENSOR.TIME_MIX_V2,
+        MODEL_TENSOR.TIME_MIX_K0, #added hxa079
+        MODEL_TENSOR.TIME_MIX_K1, #added hxa079
+        MODEL_TENSOR.TIME_MIX_K2, #added hxa079
+        MODEL_TENSOR.TIME_MIX_G1,
+        MODEL_TENSOR.TIME_MIX_G2,
+        #MODEL_TENSOR.TIME_MIX_K_K, removed 
+        #MODEL_TENSOR.TIME_MIX_K_A, removed
+        MODEL_TENSOR.TIME_MIX_R_K,
+        MODEL_TENSOR.TIME_MIX_KEY,
+        MODEL_TENSOR.TIME_MIX_VALUE,
+        MODEL_TENSOR.TIME_MIX_RECEPTANCE,
+        MODEL_TENSOR.ATTN_R_NORM,
+        #MODEL_TENSOR.TIME_MIX_LN, removed GroupNorm
+        MODEL_TENSOR.TIME_MIX_OUTPUT,
+    ],
+    MODEL_ARCH.RWKV07DMOE: [
+        #from Qwen3 Dense
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+
+
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+
+        #RWKV Block
+        #MODEL_TENSOR.TIME_MIX_LERP_FUSED, removed
+        MODEL_TENSOR.TIME_MIX_W0,
+        MODEL_TENSOR.TIME_MIX_W1,
+        MODEL_TENSOR.TIME_MIX_W2,
+        MODEL_TENSOR.TIME_MIX_A0,
+        MODEL_TENSOR.TIME_MIX_A1,
+        MODEL_TENSOR.TIME_MIX_A2,
+        MODEL_TENSOR.TIME_MIX_V0,
+        MODEL_TENSOR.TIME_MIX_V1,
+        MODEL_TENSOR.TIME_MIX_V2,
+        MODEL_TENSOR.TIME_MIX_K0, #added hxa079
+        MODEL_TENSOR.TIME_MIX_K1, #added hxa079
+        MODEL_TENSOR.TIME_MIX_K2, #added hxa079
+        MODEL_TENSOR.TIME_MIX_G1,
+        MODEL_TENSOR.TIME_MIX_G2,
+        #MODEL_TENSOR.TIME_MIX_K_K, removed 
+        #MODEL_TENSOR.TIME_MIX_K_A, removed
+        MODEL_TENSOR.TIME_MIX_R_K,
+        MODEL_TENSOR.TIME_MIX_KEY,
+        MODEL_TENSOR.TIME_MIX_VALUE,
+        MODEL_TENSOR.TIME_MIX_RECEPTANCE,
+        MODEL_TENSOR.ATTN_R_NORM,
+        #MODEL_TENSOR.TIME_MIX_LN, removed GroupNorm
+        MODEL_TENSOR.TIME_MIX_OUTPUT,
     ],
     MODEL_ARCH.MAMBA: [
         MODEL_TENSOR.TOKEN_EMBD,

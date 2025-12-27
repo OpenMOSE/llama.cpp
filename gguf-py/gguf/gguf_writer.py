@@ -890,6 +890,22 @@ class GGUFWriter:
     def add_value_residual_mix_lora_rank(self, length: int) -> None:
         self.add_uint32(Keys.Attention.VALUE_RESIDUAL_MIX_LORA_RANK.format(arch=self.arch), length)
 
+    #OpenMOSE Added
+    def add_key_residual_mix_lora_rank(self, length: int) -> None:
+        self.add_uint32(Keys.Attention.KEY_RESIDUAL_MIX_LORA_RANK.format(arch=self.arch), length)
+
+    def add_enable_qk_norm(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.ENABLE_QK_NORM.format(arch=self.arch), value)
+
+    def add_nope_in_transformer(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.NOPE_IN_TRANSFORMER.format(arch=self.arch), value)
+
+    def add_nope_in_rwkv(self, value: bool) -> None:
+        self.add_bool(Keys.Attention.NOPE_IN_RWKV.format(arch=self.arch), value)
+
+    def add_rwkv_layer_pattern(self, value: Sequence[bool]) -> None:
+        self.add_array(Keys.Attention.RWKV_LAYER_PATTERN.format(arch=self.arch), value)
+
     def add_rope_freq_base_swa(self, value: float) -> None:
         self.add_float32(Keys.Rope.FREQ_BASE_SWA.format(arch=self.arch), value)
 

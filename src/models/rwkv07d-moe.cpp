@@ -108,10 +108,6 @@ llm_build_rwkv07dmoe::llm_build_rwkv07dmoe(const llama_model & model, const llm_
                 }
 
 
-                //reshape -> [B*T,H,N] 
-               // r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
-               // k = ggml_reshape_3d(ctx0, k, head_size, n_head_kv, n_tokens);
-
                 v = ggml_view_3d(ctx0, v, head_size, n_head_kv, n_tokens,
                             ggml_element_size(k) * head_size,
                             ggml_element_size(k) * head_size * n_head_kv,
@@ -213,10 +209,6 @@ llm_build_rwkv07dmoe::llm_build_rwkv07dmoe(const llama_model & model, const llm_
                 );
 
 
-                // r = ggml_reshape_3d(ctx0, r, head_size, n_head, n_tokens);
-                // w = ggml_reshape_3d(ctx0, w, head_size, n_head, n_tokens);
-                // k = ggml_reshape_3d(ctx0, k, head_size, n_head, n_tokens);
-                // v = ggml_reshape_3d(ctx0, v, head_size, n_head, n_tokens);
                 w = ggml_view_3d(ctx0, w, head_size, n_head, n_tokens,
                             ggml_element_size(w) * head_size,
                             ggml_element_size(w) * head_size * n_head,

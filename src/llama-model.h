@@ -362,6 +362,12 @@ struct llama_layer {
     struct ggml_tensor * time_mix_k1         = nullptr;
     struct ggml_tensor * time_mix_k2         = nullptr;
 
+    //rwkv hxa07e
+    struct ggml_tensor * time_mix_dv1         = nullptr;
+    struct ggml_tensor * time_mix_dv2         = nullptr;
+
+    
+
     struct ggml_tensor * time_mix_ln     = nullptr;
     struct ggml_tensor * time_mix_ln_b   = nullptr;
     struct ggml_tensor * time_mix_output = nullptr;

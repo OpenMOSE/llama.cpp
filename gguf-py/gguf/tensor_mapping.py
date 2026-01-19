@@ -827,6 +827,14 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.v2",            # 07d
         ),
 
+        MODEL_TENSOR.TIME_MIX_DV1: (
+            "model.layers.{bid}.self_attn.dv1",            # 07e
+        ),
+
+        MODEL_TENSOR.TIME_MIX_DV2: (
+            "model.layers.{bid}.self_attn.dv2",            # 07e
+        ),
+
         MODEL_TENSOR.TIME_MIX_K0: (
             "model.layers.{bid}.attention.k0",            # rwkv7
             "model.layers.{bid}.self_attn.k0",            # 07d

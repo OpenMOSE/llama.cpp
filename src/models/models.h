@@ -86,6 +86,14 @@ struct llm_build_rwkv07dmoe : public llm_graph_context {
     llm_build_rwkv07dmoe(const llama_model & model, const llm_graph_params & params);
 };
 
+struct llm_build_rwkv07e : public llm_graph_context {
+    llm_build_rwkv07e(const llama_model & model, const llm_graph_params & params);
+};
+
+struct llm_build_rwkv07emoe : public llm_graph_context {
+    llm_build_rwkv07emoe(const llama_model & model, const llm_graph_params & params);
+};
+
 struct llm_build_baichuan : public llm_graph_context {
     llm_build_baichuan(const llama_model & model, const llm_graph_params & params);
 };

@@ -399,6 +399,8 @@ class MODEL_ARCH(IntEnum):
     ARWKV7           = auto()
     RWKV07D          = auto() #Added
     RWKV07DMOE       = auto() #Added
+    RWKV07E          = auto() #Added
+    RWKV07EMOE       = auto() #Added
     MAMBA            = auto()
     MAMBA2           = auto()
     JAMBA            = auto()
@@ -557,6 +559,8 @@ class MODEL_TENSOR(IntEnum):
     TIME_MIX_V0          = auto()
     TIME_MIX_V1          = auto()
     TIME_MIX_V2          = auto()
+    TIME_MIX_DV1         = auto()
+    TIME_MIX_DV2         = auto()
     TIME_MIX_K0          = auto()
     TIME_MIX_K1          = auto()
     TIME_MIX_K2          = auto()
@@ -799,8 +803,10 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.RWKV6QWEN2:       "rwkv6qwen2",
     MODEL_ARCH.RWKV7:            "rwkv7",
     MODEL_ARCH.ARWKV7:           "arwkv7",
-    MODEL_ARCH.RWKV07D:         "rwkv07d", #Added
+    MODEL_ARCH.RWKV07D:          "rwkv07d", #Added
     MODEL_ARCH.RWKV07DMOE:       "rwkv07d_moe", #Added
+    MODEL_ARCH.RWKV07E:          "rwkv07e", #Added
+    MODEL_ARCH.RWKV07EMOE:       "rwkv07e_moe", #Added
     MODEL_ARCH.MAMBA:            "mamba",
     MODEL_ARCH.MAMBA2:           "mamba2",
     MODEL_ARCH.JAMBA:            "jamba",
@@ -958,6 +964,8 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.TIME_MIX_V0:               "blk.{bid}.time_mix_v0",
     MODEL_TENSOR.TIME_MIX_V1:               "blk.{bid}.time_mix_v1",
     MODEL_TENSOR.TIME_MIX_V2:               "blk.{bid}.time_mix_v2",
+    MODEL_TENSOR.TIME_MIX_DV1:               "blk.{bid}.time_mix_dv1",
+    MODEL_TENSOR.TIME_MIX_DV2:               "blk.{bid}.time_mix_dv2",
     MODEL_TENSOR.TIME_MIX_K0:               "blk.{bid}.time_mix_k0",
     MODEL_TENSOR.TIME_MIX_K1:               "blk.{bid}.time_mix_k1",
     MODEL_TENSOR.TIME_MIX_K2:               "blk.{bid}.time_mix_k2",
@@ -2248,6 +2256,92 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         #MODEL_TENSOR.TIME_MIX_K_K, removed 
         #MODEL_TENSOR.TIME_MIX_K_A, removed
         MODEL_TENSOR.TIME_MIX_R_K,
+        MODEL_TENSOR.TIME_MIX_KEY,
+        MODEL_TENSOR.TIME_MIX_VALUE,
+        MODEL_TENSOR.TIME_MIX_RECEPTANCE,
+        MODEL_TENSOR.ATTN_R_NORM,
+        #MODEL_TENSOR.TIME_MIX_LN, removed GroupNorm
+        MODEL_TENSOR.TIME_MIX_OUTPUT,
+    ],
+
+    MODEL_ARCH.RWKV07E: [
+        #from Qwen3 Dense
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+
+        #RWKV Block
+        #MODEL_TENSOR.TIME_MIX_LERP_FUSED, removed
+        MODEL_TENSOR.TIME_MIX_W0,
+        MODEL_TENSOR.TIME_MIX_W1,
+        MODEL_TENSOR.TIME_MIX_W2,
+        MODEL_TENSOR.TIME_MIX_A0,
+        MODEL_TENSOR.TIME_MIX_A1,
+        MODEL_TENSOR.TIME_MIX_A2,
+        MODEL_TENSOR.TIME_MIX_V0,
+        MODEL_TENSOR.TIME_MIX_V1,
+        MODEL_TENSOR.TIME_MIX_V2,
+        MODEL_TENSOR.TIME_MIX_DV1,
+        MODEL_TENSOR.TIME_MIX_DV2,
+        MODEL_TENSOR.TIME_MIX_G1,
+        MODEL_TENSOR.TIME_MIX_G2,
+        MODEL_TENSOR.TIME_MIX_KEY,
+        MODEL_TENSOR.TIME_MIX_VALUE,
+        MODEL_TENSOR.TIME_MIX_RECEPTANCE,
+        MODEL_TENSOR.ATTN_R_NORM,
+        #MODEL_TENSOR.TIME_MIX_LN, removed GroupNorm
+        MODEL_TENSOR.TIME_MIX_OUTPUT,
+    ],
+    MODEL_ARCH.RWKV07EMOE: [
+        #from Qwen3 Dense
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_NORM,
+        MODEL_TENSOR.ATTN_K,
+        MODEL_TENSOR.ATTN_K_NORM,
+        MODEL_TENSOR.ATTN_V,
+        MODEL_TENSOR.ATTN_OUT,
+
+
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+
+        #RWKV Block
+        #MODEL_TENSOR.TIME_MIX_LERP_FUSED, removed
+        MODEL_TENSOR.TIME_MIX_W0,
+        MODEL_TENSOR.TIME_MIX_W1,
+        MODEL_TENSOR.TIME_MIX_W2,
+        MODEL_TENSOR.TIME_MIX_A0,
+        MODEL_TENSOR.TIME_MIX_A1,
+        MODEL_TENSOR.TIME_MIX_A2,
+        MODEL_TENSOR.TIME_MIX_V0,
+        MODEL_TENSOR.TIME_MIX_V1,
+        MODEL_TENSOR.TIME_MIX_V2,
+        MODEL_TENSOR.TIME_MIX_DV1,
+        MODEL_TENSOR.TIME_MIX_DV2,
+
+        MODEL_TENSOR.TIME_MIX_G1,
+        MODEL_TENSOR.TIME_MIX_G2,
+
         MODEL_TENSOR.TIME_MIX_KEY,
         MODEL_TENSOR.TIME_MIX_VALUE,
         MODEL_TENSOR.TIME_MIX_RECEPTANCE,

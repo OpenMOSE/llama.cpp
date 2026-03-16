@@ -43,7 +43,7 @@ llama_memory_hybrid::llama_memory_hybrid(
         n_swa,
         swa_type,
         filter_attn == nullptr ?
-            [&](int32_t il) { return !hparams.is_recurrent(il); }
+            [&](int32_t il) { return !hparams.is_recurrent(il); } 
             : filter_attn,
         nullptr
     )),
@@ -55,7 +55,9 @@ llama_memory_hybrid::llama_memory_hybrid(
         rs_size,
         n_seq_max,
         filter_recr == nullptr ?
-            [&](int32_t il) { return hparams.is_recurrent(il); }
+            [&](int32_t il) { 
+                return 1;//return hparams.is_recurrent(il); 
+            }
             : filter_recr
     )) {}
 

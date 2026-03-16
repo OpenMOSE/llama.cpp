@@ -291,6 +291,7 @@ class TensorNameMap:
             "layers.{bid}.self_attn.o_proj",                                # qwen3-embedding
             "backbone.layers.{bid}.mixer.o_proj",                           # nemotron-h
             "model.layers.{bid}.self_attn.language_expert_dense",           # cogvlm
+            "model.layers.{bid}.self_attn.output_proj",                     # rwkv tica
         ),
 
         # Attention output norm
@@ -966,6 +967,34 @@ class TensorNameMap:
             "model.layers.{bid}.self_attn.output", # 07d
         ),
 
+        MODEL_TENSOR.TIME_TINY_Q: (
+            "model.layers.{bid}.self_attn.tiny_q_proj", # rwkv tica
+        ),
+        MODEL_TENSOR.TIME_TINY_K: (
+            "model.layers.{bid}.self_attn.tiny_k_proj", # rwkv tica
+        ),
+        MODEL_TENSOR.TIME_TINY_V: (
+            "model.layers.{bid}.self_attn.tiny_v_proj", # rwkv tica
+        ),
+        MODEL_TENSOR.TIME_TINY_O: (
+            "model.layers.{bid}.self_attn.tiny_o_proj", # rwkv tica
+        ),
+
+        MODEL_TENSOR.TIME_TINY_Q_NORM: (
+            "model.layers.{bid}.self_attn.tiny_q_norm", # rwkv tica
+        ),
+        MODEL_TENSOR.TIME_TINY_K_NORM: (
+            "model.layers.{bid}.self_attn.tiny_k_norm", # rwkv tica
+        ),
+
+        MODEL_TENSOR.TIME_TINY_G1: (
+            "model.layers.{bid}.self_attn.tiny_g1", # rwkv tica
+        ),
+
+        MODEL_TENSOR.TIME_TINY_G2: (
+            "model.layers.{bid}.self_attn.tiny_g2", # rwkv tica
+        ),
+
         MODEL_TENSOR.CHANNEL_MIX_LERP_K: (
             "rwkv.blocks.{bid}.feed_forward.time_maa_k", # rwkv6
             "model.layers.{bid}.feed_forward.x_k",       # rwkv7
@@ -992,20 +1021,24 @@ class TensorNameMap:
         MODEL_TENSOR.ATTN_Q_A: (
             "model.layers.{bid}.self_attn.q_a_proj", # deepseek2
             "layers.{bid}.attention.wq_a",           # mistral-large
+            "model.layers.{bid}.self_attn.receptance_a_proj", # rwkv tica
         ),
 
         MODEL_TENSOR.ATTN_Q_B: (
             "model.layers.{bid}.self_attn.q_b_proj", # deepseek2
             "layers.{bid}.attention.wq_b",           # mistral-large
+            "model.layers.{bid}.self_attn.receptance_b_proj", # rwkv tica
         ),
 
         MODEL_TENSOR.ATTN_KV_A_MQA: (
             "model.layers.{bid}.self_attn.kv_a_proj_with_mqa", # deepseek2
             "layers.{bid}.attention.wkv_a_with_mqa",           # mistral-large
+            "model.layers.{bid}.self_attn.keyvalue_a_proj_with_mqa", # rwkv tica
         ),
 
         MODEL_TENSOR.ATTN_KV_B: (
             "model.layers.{bid}.self_attn.kv_b_proj", # deepseek2
+            "model.layers.{bid}.self_attn.keyvalue_b_proj", # rwkv tica
         ),
 
         MODEL_TENSOR.ATTN_K_B: (
@@ -1021,11 +1054,13 @@ class TensorNameMap:
         MODEL_TENSOR.ATTN_Q_A_NORM: (
             "model.layers.{bid}.self_attn.q_a_layernorm", # deepseek2
             "layers.{bid}.attention.q_a_norm",            # mistral-large
+            "model.layers.{bid}.self_attn.receptance_a_layernorm", # rwkv tica
         ),
 
         MODEL_TENSOR.ATTN_KV_A_NORM: (
             "model.layers.{bid}.self_attn.kv_a_layernorm", # deepseek2
             "layers.{bid}.attention.kv_a_norm",            # mistral-large
+            "model.layers.{bid}.self_attn.keyvalue_a_layernorm", # rwkv tica
         ),
 
         MODEL_TENSOR.ATTN_SUB_NORM: (

@@ -97,6 +97,8 @@ struct llama_hparams {
     uint32_t time_mix_extra_dim     = 0;
     uint32_t time_decay_extra_dim   = 0;
     uint32_t wkv_head_size          = 0;
+    uint32_t wkv_tiny_head          = 4;
+    uint32_t wkv_tiny_kv_head       = 2;
     uint32_t token_shift_count      = 2;
     uint32_t n_lora_decay           = 0;
     uint32_t n_lora_iclr            = 0;

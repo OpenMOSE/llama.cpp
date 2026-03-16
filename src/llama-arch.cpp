@@ -88,6 +88,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_RWKV07DMOE,       "rwkv07d_moe"      },
     { LLM_ARCH_RWKV07E,          "rwkv07e"          },
     { LLM_ARCH_RWKV07EMOE,       "rwkv07e_moe"      },
+    { LLM_ARCH_RWKV07IMOE,       "rwkv07i_moe"      },
     { LLM_ARCH_GRANITE,          "granite"          },
     { LLM_ARCH_GRANITE_MOE,      "granitemoe"       },
     { LLM_ARCH_GRANITE_HYBRID,   "granitehybrid"    },
@@ -479,6 +480,19 @@ static const std::map<llm_tensor, const char *> LLM_TENSOR_NAMES = {
     { LLM_TENSOR_TIME_MIX_K_K,                           "blk.%d.time_mix_k_k" },
     { LLM_TENSOR_TIME_MIX_K_A,                           "blk.%d.time_mix_k_a" },
     { LLM_TENSOR_TIME_MIX_R_K,                           "blk.%d.time_mix_r_k" },
+
+    { LLM_TENSOR_TIME_TINY_Q,                            "blk.%d.time_mix_tiny_q" },
+    { LLM_TENSOR_TIME_TINY_K,                            "blk.%d.time_mix_tiny_k" },
+    { LLM_TENSOR_TIME_TINY_V,                            "blk.%d.time_mix_tiny_v" },
+    { LLM_TENSOR_TIME_TINY_O,                            "blk.%d.time_mix_tiny_o" },
+
+    { LLM_TENSOR_TIME_TINY_Q_NORM,                            "blk.%d.time_mix_tiny_q_norm" },
+    { LLM_TENSOR_TIME_TINY_K_NORM,                            "blk.%d.time_mix_tiny_k_norm" },
+
+    { LLM_TENSOR_TIME_TINY_G1,                            "blk.%d.time_mix_tiny_g1" },
+    { LLM_TENSOR_TIME_TINY_G2,                            "blk.%d.time_mix_tiny_g2" },
+
+
     { LLM_TENSOR_CONV1D,                                 "conv1d" },
     { LLM_TENSOR_CONVNEXT_DW,                            "convnext.%d.dw" },
     { LLM_TENSOR_CONVNEXT_NORM,                          "convnext.%d.norm" },
@@ -1999,6 +2013,92 @@ static std::set<llm_tensor> llm_get_tensor_names(llm_arch arch) {
                 LLM_TENSOR_FFN_DOWN_EXPS,
                 LLM_TENSOR_FFN_UP_EXPS,
             };
+        case LLM_ARCH_RWKV07IMOE:
+            return {
+                // LLM_TENSOR_TOKEN_EMBD,
+                // LLM_TENSOR_TOKEN_EMBD_NORM,
+                // LLM_TENSOR_OUTPUT_NORM,
+                // LLM_TENSOR_OUTPUT,
+                // LLM_TENSOR_ATTN_NORM,
+                // LLM_TENSOR_TIME_MIX_W0,
+                // LLM_TENSOR_TIME_MIX_W1,
+                // LLM_TENSOR_TIME_MIX_W2,
+                // LLM_TENSOR_TIME_MIX_A0,
+                // LLM_TENSOR_TIME_MIX_A1,
+                // LLM_TENSOR_TIME_MIX_A2,
+                // LLM_TENSOR_TIME_MIX_V0,
+                // LLM_TENSOR_TIME_MIX_V1,
+                // LLM_TENSOR_TIME_MIX_V2,
+                // LLM_TENSOR_TIME_MIX_DV1,
+                // LLM_TENSOR_TIME_MIX_DV2,
+                // LLM_TENSOR_TIME_MIX_G1,
+                // LLM_TENSOR_TIME_MIX_G2,
+                // LLM_TENSOR_TIME_MIX_KEY,
+                // LLM_TENSOR_TIME_MIX_VALUE,
+                // LLM_TENSOR_TIME_MIX_RECEPTANCE,
+                // LLM_TENSOR_TIME_MIX_OUTPUT,
+                // LLM_TENSOR_ATTN_R_NORM,
+                // LLM_TENSOR_ATTN_NORM,
+                // LLM_TENSOR_ATTN_Q,
+                // LLM_TENSOR_ATTN_Q_NORM,
+                // LLM_TENSOR_ATTN_K,
+                // LLM_TENSOR_ATTN_K_NORM,
+                // LLM_TENSOR_ATTN_V,
+                // LLM_TENSOR_ATTN_OUT,
+                // LLM_TENSOR_FFN_NORM,
+                // LLM_TENSOR_FFN_GATE_INP,
+                // LLM_TENSOR_FFN_GATE_EXPS,
+                // LLM_TENSOR_FFN_DOWN_EXPS,
+                // LLM_TENSOR_FFN_UP_EXPS,
+
+                LLM_TENSOR_TIME_MIX_W0,
+                LLM_TENSOR_TIME_MIX_W1,
+                LLM_TENSOR_TIME_MIX_W2,
+                LLM_TENSOR_TIME_MIX_A0,
+                LLM_TENSOR_TIME_MIX_A1,
+                LLM_TENSOR_TIME_MIX_A2,
+                LLM_TENSOR_TIME_MIX_G1,
+                LLM_TENSOR_TIME_MIX_G2,
+
+                LLM_TENSOR_TIME_TINY_Q,
+                LLM_TENSOR_TIME_TINY_K,
+                LLM_TENSOR_TIME_TINY_V,
+                LLM_TENSOR_TIME_TINY_O,
+
+                LLM_TENSOR_TIME_TINY_Q_NORM,
+                LLM_TENSOR_TIME_TINY_K_NORM,
+
+                LLM_TENSOR_TIME_TINY_G1,
+                LLM_TENSOR_TIME_TINY_G2,
+
+                LLM_TENSOR_TOKEN_EMBD,
+                LLM_TENSOR_OUTPUT_NORM,
+                LLM_TENSOR_OUTPUT,
+                LLM_TENSOR_ATTN_NORM,
+                LLM_TENSOR_ATTN_Q_A_NORM,
+                LLM_TENSOR_ATTN_KV_A_NORM,
+                LLM_TENSOR_ATTN_Q,
+                LLM_TENSOR_ATTN_Q_A,
+                LLM_TENSOR_ATTN_Q_B,
+                LLM_TENSOR_ATTN_KV_A_MQA,
+                LLM_TENSOR_ATTN_KV_B,
+                LLM_TENSOR_ATTN_K_B,
+                LLM_TENSOR_ATTN_V_B,
+                LLM_TENSOR_ATTN_OUT,
+                LLM_TENSOR_FFN_NORM,
+                LLM_TENSOR_FFN_GATE,
+                LLM_TENSOR_FFN_UP,
+                LLM_TENSOR_FFN_DOWN,
+                LLM_TENSOR_FFN_GATE_INP,
+                LLM_TENSOR_FFN_GATE_EXPS,
+                LLM_TENSOR_FFN_DOWN_EXPS,
+                LLM_TENSOR_FFN_UP_EXPS,
+                LLM_TENSOR_FFN_GATE_INP_SHEXP,
+                LLM_TENSOR_FFN_GATE_SHEXP,
+                LLM_TENSOR_FFN_DOWN_SHEXP,
+                LLM_TENSOR_FFN_UP_SHEXP,
+                LLM_TENSOR_FFN_EXP_PROBS_B,
+            };
         case LLM_ARCH_GRANITE_MOE:
             return {
                 LLM_TENSOR_TOKEN_EMBD,
@@ -2483,6 +2583,19 @@ static const std::map<llm_tensor, llm_tensor_info> LLM_TENSOR_INFOS = {
     {LLM_TENSOR_TIME_MIX_RECEPTANCE,        {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_TIME_MIX_GATE,              {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_TIME_MIX_OUTPUT,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+
+    {LLM_TENSOR_TIME_TINY_Q,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_TIME_TINY_K,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_TIME_TINY_V,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_TIME_TINY_O,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+
+    {LLM_TENSOR_TIME_TINY_G1,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+    {LLM_TENSOR_TIME_TINY_G2,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
+
+    {LLM_TENSOR_TIME_TINY_Q_NORM,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+    {LLM_TENSOR_TIME_TINY_K_NORM,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL}},
+
+
     {LLM_TENSOR_CHANNEL_MIX_KEY,            {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_CHANNEL_MIX_RECEPTANCE,     {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
     {LLM_TENSOR_CHANNEL_MIX_VALUE,          {LLM_TENSOR_LAYER_REPEATING, GGML_OP_MUL_MAT}},
@@ -2682,6 +2795,7 @@ bool llm_arch_is_hybrid(const llm_arch & arch) {
         case LLM_ARCH_RWKV07DMOE:
         case LLM_ARCH_RWKV07E:
         case LLM_ARCH_RWKV07EMOE:
+        case LLM_ARCH_RWKV07IMOE:
             return true;
         default:
             return false;

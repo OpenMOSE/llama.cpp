@@ -2111,6 +2111,93 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                     default: type = LLM_TYPE_UNKNOWN;
                 }
             } break;
+        case LLM_ARCH_RWKV07IMOE: //Added hxa07imoe
+            {
+
+                // lite variants include DeepSeek-V2-Lite, GigaChat3-10B-A1.8B
+                bool is_lite = 0;//(hparams.n_layer == 27 || hparams.n_layer == 26);
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+                ml.get_key(LLM_KV_LEADING_DENSE_BLOCK_COUNT,   hparams.n_layer_dense_lead);
+
+                ml.get_key(LLM_KV_ATTENTION_Q_LORA_RANK, hparams.n_lora_q);
+ 
+                ml.get_key(LLM_KV_ATTENTION_KV_LORA_RANK,     hparams.n_lora_kv);
+                ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH_MLA,   hparams.n_embd_head_k_mla, false);
+                ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH_MLA, hparams.n_embd_head_v_mla, false);
+                ml.get_key(LLM_KV_ATTENTION_KEY_LENGTH,   hparams.n_embd_head_k, false);
+                ml.get_key(LLM_KV_ATTENTION_VALUE_LENGTH, hparams.n_embd_head_v, false);
+                ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp);
+                ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,        hparams.n_expert_shared);
+                ml.get_key(LLM_KV_EXPERT_SHARED_FEED_FORWARD_LENGTH, hparams.n_ff_shexp, false);
+                ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,       hparams.expert_weights_scale);
+                ml.get_key(LLM_KV_EXPERT_WEIGHTS_NORM,        hparams.expert_weights_norm, false);
+                ml.get_key(LLM_KV_EXPERT_GATING_FUNC,         hparams.expert_gating_func, false);
+                // if (hparams.expert_gating_func == LLAMA_EXPERT_GATING_FUNC_TYPE_NONE) {
+                //     // for compatibility with existing DeepSeek V2 and V2.5 GGUFs
+                //     // that have no expert_gating_func model parameter set
+                //     hparams.expert_gating_func = LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX;
+                // }
+
+                hparams.expert_gating_func = LLAMA_EXPERT_GATING_FUNC_TYPE_SIGMOID;
+
+                // if (ml.get_key(LLM_KV_ROPE_SCALING_YARN_LOG_MUL, hparams.rope_yarn_log_mul, 0.0f)) {
+                //     // [TAG_DEEPSEEK2_YARN_LOG_MUL_FIX]
+                //     // cancel the factor from the convert script
+                //     hparams.rope_yarn_log_mul /= 0.1f;
+                // }
+
+                // (optional) temperature tuning - used by mistral-large
+                ml.get_key(LLM_KV_ATTENTION_TEMPERATURE_SCALE,  hparams.f_attn_temp_scale,       false);
+                ml.get_key(LLM_KV_ATTENTION_TEMPERATURE_LENGTH, hparams.n_attn_temp_floor_scale, false);
+
+                hparams.f_attn_temp_offset = 0.0f;
+
+                switch (hparams.n_layer) {
+                    case 27: type = LLM_TYPE_16B; break;
+                    case 47: type = LLM_TYPE_30B_A3B; break;
+                    case 60: type = LLM_TYPE_236B; break;
+                    case 61: type = LLM_TYPE_671B; break;
+                    default: type = LLM_TYPE_UNKNOWN;
+                }
+
+
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,            hparams.f_norm_rms_eps, false);
+                ml.get_key(LLM_KV_WKV_HEAD_SIZE,                          hparams.wkv_head_size);
+                ml.get_key(LLM_KV_ATTENTION_DECAY_LORA_RANK,              hparams.n_lora_decay);
+                ml.get_key(LLM_KV_ATTENTION_ICLR_LORA_RANK,               hparams.n_lora_iclr);
+                ml.get_key(LLM_KV_ATTENTION_GATE_LORA_RANK,               hparams.n_lora_gate);
+                ml.get_key(LLM_KV_ATTENTION_HEAD_COUNT_KV,                hparams.n_head_kv_);
+                ml.get_key(LLM_KV_ATTENTION_ENABLE_QK_NORM,                hparams.enable_qk_norm,true);
+                ml.get_key(LLM_KV_ATTENTION_NOPE_IN_RWKV,                 hparams.nope_in_rwkv,true);
+
+                hparams.wkv_head_size = 128;
+                hparams.wkv_tiny_head = 4;
+                hparams.wkv_tiny_kv_head = 2;
+
+                //hparams.n_embd_k_gqa = hparams.wkv_head_size * hparams.wkv_tiny_kv_head;
+
+                LLAMA_LOG_INFO("n_lora_value_res_mix %d: GGUFs\n", hparams.n_lora_value_res_mix);
+
+                ml.get_key_or_arr(LLM_KV_ATTENTION_RWKV_LAYER_PATTERN, hparams.rwkv_layers, hparams.n_layer, 1);
+
+                hparams.n_embd_head_k = hparams.wkv_head_size;
+                hparams.n_embd_head_v = hparams.wkv_head_size;
+                // printf("n_embd_head_k = %d", hparams.n_embd_head_k);
+
+                // exit(1);
+
+
+                
+
+                for (uint32_t i = 0; i < hparams.n_layer; ++i) {
+                    hparams.recurrent_layer_arr[i] = hparams.rwkv_layers[i] == 1;
+                }
+                // switch (hparams.n_layer) {
+                //     case 48: type = LLM_TYPE_30B_A3B; break;
+                //     case 94: type = LLM_TYPE_235B_A22B; break;
+                //     default: type = LLM_TYPE_UNKNOWN;
+                // }
+            } break;
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:
             {
@@ -6266,6 +6353,275 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                 } break;
 
 
+            case LLM_ARCH_RWKV07IMOE:
+                {
+
+                    // lite variants include DeepSeek-V2-Lite, GigaChat3-10B-A1.8B
+                    const bool is_lite = -1;
+
+                    const int n_lora_decay = hparams.n_lora_decay;
+                    const int n_lora_iclr = hparams.n_lora_iclr;
+                    const int n_lora_value_res_mix = hparams.n_lora_value_res_mix;
+                    const int n_lora_gate = hparams.n_lora_gate;
+                    const int attn_hidden_size = n_embd;
+                    hparams.n_head_kv_ = n_head_kv;
+                    hparams.n_head_att_ = n_head * 2;
+
+                    const int n_kv = n_head_kv;
+
+                    LLAMA_LOG_INFO("phase 2 n_lora_value_res_mix %d: GGUFs n_kv %d\n", n_lora_value_res_mix,n_kv);
+                 
+
+                    const bool is_mla = 0;//(hparams.n_embd_head_k_mla != 0 && hparams.n_embd_head_v_mla != 0);
+
+                    // note: these are the actual head sizes you get when treating as MHA or after "decompression" using wv_b for MLA
+                    const int64_t n_embd_head_k_mla = is_mla ? hparams.n_embd_head_k_mla : hparams.n_embd_head_k;
+                    const int64_t n_embd_head_v_mla = is_mla ? hparams.n_embd_head_v_mla : hparams.n_embd_head_v;
+
+                    const int64_t n_embd_head_qk_rope = hparams.n_rot;
+                    const int64_t n_embd_head_qk_nope = n_embd_head_k_mla - n_embd_head_qk_rope;
+
+                    const int64_t q_lora_rank  = hparams.n_lora_q;
+                    const int64_t kv_lora_rank = hparams.n_lora_kv;
+
+                    const int64_t n_ff_exp        = hparams.n_ff_exp;
+                    const int64_t n_expert_shared = hparams.n_expert_shared;
+
+                    printf("phase 3 n_embd_head_k_mla %ld: n_embd_head_v_mla %ld n_head %d\n", n_embd_head_k_mla,n_embd_head_v_mla,n_head);
+
+                    printf("phase 3 q_lora_rank %ld: kv_lora_rank %ld \n", q_lora_rank,kv_lora_rank);
+
+                   // exit(1);
+
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+
+                    //exit(1);
+
+                    // output
+                    output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab}, 0);
+
+                    int HardCoded_HeadSize = 256;
+                    int HardCoded_nope_headsize = 192;
+                    int HeadCoded_PureHeadSize = 128;
+
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        bool is_efficient_layer = hparams.is_rwkv(i);
+
+                        layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+                        layer.attn_q_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_A_NORM, "weight", i), {q_lora_rank}, 0);
+                        layer.attn_kv_a_norm = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_NORM, "weight", i), {kv_lora_rank}, 0);
+                        layer.wq_a = create_tensor(tn(LLM_TENSOR_ATTN_Q_A, "weight", i), {n_embd, q_lora_rank}, 0);
+                        layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q_B, "weight", i), {q_lora_rank, n_head * HardCoded_HeadSize}, 0);
+                        layer.wkv_a_mqa = create_tensor(tn(LLM_TENSOR_ATTN_KV_A_MQA, "weight", i), {n_embd, kv_lora_rank + n_embd_head_qk_rope}, 0);
+                        layer.wkv_b = create_tensor(tn(LLM_TENSOR_ATTN_KV_B, "weight", i), {kv_lora_rank, n_head * (HardCoded_nope_headsize + HardCoded_HeadSize)}, 0);
+                        layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head * HardCoded_HeadSize, n_embd}, 0);
+
+                        layer.time_mix_w1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W1, "weight", i), {n_embd, n_lora_decay}, 0);
+                        layer.time_mix_w2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W2, "weight", i), {n_lora_decay, HardCoded_HeadSize * n_head}, 0);
+                        layer.time_mix_w0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W0, "weight", i), {HardCoded_HeadSize * n_head}, 0);
+                        layer.time_mix_a1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A1, "weight", i), {n_embd, n_lora_iclr}, 0);
+                        layer.time_mix_a2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A2, "weight", i), {n_lora_iclr, HardCoded_HeadSize * n_head}, 0);
+                        layer.time_mix_a0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A0, "weight", i), {HardCoded_HeadSize * n_head}, 0);
+
+                        layer.time_mix_g1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G1, "weight", i), {n_embd, n_lora_gate}, 0);
+                        layer.time_mix_g2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G2, "weight", i), {n_lora_gate, HardCoded_HeadSize * n_head}, 0);
+                        // hparams.wkv_tiny_head = 4;
+                        // hparams.wkv_tiny_kv_head = 2;
+
+                        if(is_efficient_layer == false) {
+                        int wkv_tiny_head = hparams.wkv_tiny_head;
+                        int wkv_tiny_kv_head = hparams.wkv_tiny_kv_head;
+                        layer.time_mix_tiny_q = create_tensor(tn(LLM_TENSOR_TIME_TINY_Q, "weight", i), {n_embd, wkv_tiny_head * HeadCoded_PureHeadSize}, 0);
+                        layer.time_mix_tiny_k = create_tensor(tn(LLM_TENSOR_TIME_TINY_K, "weight", i), {n_embd, wkv_tiny_kv_head * HeadCoded_PureHeadSize}, 0);
+                        layer.time_mix_tiny_v = create_tensor(tn(LLM_TENSOR_TIME_TINY_V, "weight", i), {n_embd, wkv_tiny_kv_head * HeadCoded_PureHeadSize}, 0);
+                        layer.time_mix_tiny_o = create_tensor(tn(LLM_TENSOR_TIME_TINY_O, "weight", i), {wkv_tiny_head * HeadCoded_PureHeadSize,n_embd}, 0);
+                        
+                        layer.time_mix_tiny_q_norm = create_tensor(tn(LLM_TENSOR_TIME_TINY_Q_NORM, "weight", i), {HeadCoded_PureHeadSize}, 0);
+                        layer.time_mix_tiny_k_norm = create_tensor(tn(LLM_TENSOR_TIME_TINY_K_NORM, "weight", i), {HeadCoded_PureHeadSize}, 0);
+
+                        layer.time_mix_tiny_g1 = create_tensor(tn(LLM_TENSOR_TIME_TINY_G1, "weight", i), {n_embd, 128}, 0);
+                        layer.time_mix_tiny_g2 = create_tensor(tn(LLM_TENSOR_TIME_TINY_G2, "weight", i), {128, wkv_tiny_head * HeadCoded_PureHeadSize}, 0);
+
+                        
+                        }
+
+
+                        layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+
+                        if (i < (int) hparams.n_layer_dense_lead) {
+                            layer.ffn_gate = create_tensor(tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd,   n_ff}, 0);
+                            layer.ffn_down = create_tensor(tn(LLM_TENSOR_FFN_DOWN, "weight", i), {  n_ff, n_embd}, 0);
+                            layer.ffn_up   = create_tensor(tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
+                        } else {
+                            layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+                            layer.ffn_exp_probs_b = create_tensor(tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias", i), {n_expert}, TENSOR_NOT_REQUIRED);
+
+                            if (n_expert == 0) {
+                                throw std::runtime_error("n_expert must be > 0");
+                            }
+                            if (n_expert_used == 0) {
+                                throw std::runtime_error("n_expert_used must be > 0");
+                            }
+
+                            // // MoE branch
+                            // layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                            // layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
+                            // layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+
+                            // // Shared expert branch
+                            // layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_exp * n_expert_shared}, 0);
+                            // layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {        n_ff_exp * n_expert_shared, n_embd}, 0);
+                            // layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_exp * n_expert_shared}, 0);
+
+                            // MoE branch
+                            const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
+
+                            layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                            layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
+                            layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+
+                            // Shared expert branch
+                            const int64_t n_ff_shexp = n_ff_exp;//hparams.n_ff_shexp ? hparams.n_ff_shexp : n_ff;
+
+                           // layer.ffn_gate_inp_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP_SHEXP, "weight", i), {n_embd}, 0);
+                            layer.ffn_gate_shexp = create_tensor(tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {    n_embd, n_ff_shexp}, 0);
+                            layer.ffn_down_shexp = create_tensor(tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp,     n_embd}, 0);
+                            layer.ffn_up_shexp   = create_tensor(tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {    n_embd, n_ff_shexp}, 0);
+                        }
+                    }
+
+
+
+
+
+
+
+
+
+
+
+
+                    // tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+
+                    // // output
+                    // output_norm = create_tensor(tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    // output      = create_tensor(tn(LLM_TENSOR_OUTPUT,      "weight"), {n_embd, n_vocab},0);
+                    // // if output is NULL, init from the input tok embed
+                    // // if (output == NULL) {
+                    // //     output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+                    // // }
+
+                    
+
+                    // // const int n_lora_decay = hparams.n_lora_decay;
+                    // // const int n_lora_iclr = hparams.n_lora_iclr;
+                    // // const int n_lora_value_res_mix = hparams.n_lora_value_res_mix;
+                    // // const int n_lora_gate = hparams.n_lora_gate;
+                    // // const int attn_hidden_size = n_embd;
+                    // // hparams.n_head_kv_ = n_head_kv;
+                    // // hparams.n_head_att_ = n_head;
+
+                    // // const int n_kv = n_head_kv;
+
+                    // LLAMA_LOG_INFO("phase 2 n_lora_value_res_mix %d: GGUFs n_kv %d\n", n_lora_value_res_mix,n_kv);
+                
+
+                    // for (int i = 0; i < n_layer; ++i) {
+                    //     auto & layer = layers[i];
+                    //     bool is_rwkv_layer = hparams.is_rwkv(i);
+                    //     //LLAMA_LOG_INFO("Layer %d: is_RWKV %d \n", i, is_rwkv_layer);
+                
+                    //     if (is_rwkv_layer){
+                            
+                    //         layer.time_mix_w1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W1, "weight", i), {n_embd_head_k * n_head, n_lora_decay}, 0);
+                    //         layer.time_mix_w2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W2, "weight", i), {n_lora_decay, n_embd_head_k * n_head}, 0);
+                    //         layer.time_mix_w0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_W0, "weight", i), {n_embd_head_k * n_head}, 0);
+
+                            
+                    //         layer.time_mix_a1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A1, "weight", i), {n_embd_head_k * n_head, n_lora_iclr}, 0);
+                    //         layer.time_mix_a2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A2, "weight", i), {n_lora_iclr, n_embd_head_k * n_head}, 0);
+                    //         layer.time_mix_a0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_A0, "weight", i), {n_embd_head_k * n_head}, 0);
+
+                      
+                                
+                    //         layer.time_mix_v1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V1, "weight", i), {n_embd, n_lora_value_res_mix}, 0);
+                    //         layer.time_mix_v2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V2, "weight", i), {n_lora_value_res_mix, n_embd_head_k*n_kv}, 0);
+                    //         layer.time_mix_v0 = create_tensor(tn(LLM_TENSOR_TIME_MIX_V0, "weight", i), {n_embd_head_k*n_kv}, 0);
+
+                    //         layer.time_mix_dv1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_DV1, "weight", i), {n_embd, n_lora_value_res_mix}, 0);
+                    //         layer.time_mix_dv2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_DV2, "weight", i), {n_lora_value_res_mix,  n_embd_head_k * n_head}, 0);
+                        
+                    //         layer.time_mix_g1 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G1, "weight", i), {n_embd_head_k * n_head, n_lora_gate},0);
+                    //         layer.time_mix_g2 = create_tensor(tn(LLM_TENSOR_TIME_MIX_G2, "weight", i), {n_lora_gate, n_embd_head_k * n_head},0);
+
+                    //         layer.time_mix_receptance = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
+                    //         layer.time_mix_key = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+                    //         layer.time_mix_value = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+
+                    //         // optional bias tensors
+                    //         layer.time_mix_key_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_KEY, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                    //         layer.time_mix_value_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_VALUE, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                    //         layer.time_mix_receptance_b = create_tensor(tn(LLM_TENSOR_TIME_MIX_RECEPTANCE, "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
+
+                            
+                    //         layer.time_mix_output = create_tensor(tn(LLM_TENSOR_TIME_MIX_OUTPUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+                    //         if (hparams.enable_qk_norm == true){
+                    //             layer.attn_r_norm = create_tensor(tn(LLM_TENSOR_ATTN_R_NORM, "weight", i), {n_embd_head_k}, 0);
+                    //            // layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
+                    //             layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
+                    //         }
+                    //     }
+                    //     else{
+                    //         layer.wq = create_tensor(tn(LLM_TENSOR_ATTN_Q,   "weight", i), {n_embd, n_embd_head_k * n_head}, 0);
+                    //         layer.wk = create_tensor(tn(LLM_TENSOR_ATTN_K,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+                    //         layer.wv = create_tensor(tn(LLM_TENSOR_ATTN_V,   "weight", i), {n_embd, n_embd_head_k*n_kv}, 0);
+                    //         layer.wo = create_tensor(tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_embd_head_k * n_head, n_embd}, 0);
+
+                    //         //optional bias tensors
+                    //         layer.wk_b = create_tensor(tn(LLM_TENSOR_ATTN_K, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                    //         layer.wv_b = create_tensor(tn(LLM_TENSOR_ATTN_V, "bias", i), {n_embd_head_k*n_kv}, TENSOR_NOT_REQUIRED);
+                    //         layer.wq_b = create_tensor(tn(LLM_TENSOR_ATTN_Q, "bias", i), {n_embd_head_k * n_head}, TENSOR_NOT_REQUIRED);
+
+
+                    //         if (hparams.enable_qk_norm == true){
+                    //             layer.attn_q_norm = create_tensor(tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {n_embd_head_k}, 0);
+                    //             layer.attn_k_norm = create_tensor(tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {n_embd_head_k}, 0);
+                    //         }
+                            
+                            
+                    //     }
+
+                    //     layer.attn_norm = create_tensor(tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+
+                        
+
+                        
+                        
+
+                    //     layer.ffn_norm = create_tensor(tn(LLM_TENSOR_FFN_NORM, "weight", i), {n_embd}, 0);
+
+                    //     layer.ffn_gate_inp = create_tensor(tn(LLM_TENSOR_FFN_GATE_INP, "weight", i), {n_embd, n_expert}, 0);
+
+                    //     if (n_expert == 0) {
+                    //         throw std::runtime_error("n_expert must be > 0 for QWEN3MOE");
+                    //     }
+                    //     if (n_expert_used == 0) {
+                    //         throw std::runtime_error("n_expert_used must be > 0 for QWEN3MOE");
+                    //     }
+
+                    //     // MoE branch
+                    //     const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
+
+                    //     layer.ffn_gate_exps = create_tensor(tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                    //     layer.ffn_down_exps = create_tensor(tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp,   n_embd, n_expert}, 0);
+                    //     layer.ffn_up_exps   = create_tensor(tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {  n_embd, n_ff_exp, n_expert}, 0);
+                    // }
+                } break;
+
+
             case LLM_ARCH_CHAMELEON:
                 {
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
@@ -8277,6 +8633,10 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
             {
                 llm = std::make_unique<llm_build_rwkv07emoe>(*this, params);
             } break;
+        case LLM_ARCH_RWKV07IMOE:
+            {
+                llm = std::make_unique<llm_build_rwkv07imoe>(*this, params);
+            } break;
         case LLM_ARCH_GRANITE:
         case LLM_ARCH_GRANITE_MOE:
         case LLM_ARCH_MINICPM:
@@ -8535,6 +8895,8 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_WAVTOKENIZER_DEC:
         case LLM_ARCH_NEMOTRON_H:
         case LLM_ARCH_NEMOTRON_H_MOE:
+
+        case LLM_ARCH_RWKV07IMOE:
         
         
             return LLAMA_ROPE_TYPE_NONE;

@@ -401,6 +401,7 @@ class MODEL_ARCH(IntEnum):
     RWKV07DMOE       = auto() #Added
     RWKV07E          = auto() #Added
     RWKV07EMOE       = auto() #Added
+    RWKV07IMOE       = auto() #Added
     MAMBA            = auto()
     MAMBA2           = auto()
     JAMBA            = auto()
@@ -586,6 +587,14 @@ class MODEL_TENSOR(IntEnum):
     TIME_MIX_GATE        = auto()
     TIME_MIX_LN          = auto()
     TIME_MIX_OUTPUT      = auto()
+    TIME_TINY_Q          = auto() #for TICA
+    TIME_TINY_Q_NORM          = auto() #for TICA
+    TIME_TINY_K          = auto() #for TICA
+    TIME_TINY_K_NORM          = auto() #for TICA
+    TIME_TINY_V          = auto() #for TICA
+    TIME_TINY_O          = auto() #for TICA
+    TIME_TINY_G1         = auto() #for TICA
+    TIME_TINY_G2         = auto() #for TICA
     CHANNEL_MIX_LERP_K   = auto()
     CHANNEL_MIX_LERP_R   = auto()
     CHANNEL_MIX_KEY      = auto()
@@ -807,6 +816,7 @@ MODEL_ARCH_NAMES: dict[MODEL_ARCH, str] = {
     MODEL_ARCH.RWKV07DMOE:       "rwkv07d_moe", #Added
     MODEL_ARCH.RWKV07E:          "rwkv07e", #Added
     MODEL_ARCH.RWKV07EMOE:       "rwkv07e_moe", #Added
+    MODEL_ARCH.RWKV07IMOE:       "rwkv07i_moe", #Added
     MODEL_ARCH.MAMBA:            "mamba",
     MODEL_ARCH.MAMBA2:           "mamba2",
     MODEL_ARCH.JAMBA:            "jamba",
@@ -991,6 +1001,14 @@ TENSOR_NAMES: dict[MODEL_TENSOR, str] = {
     MODEL_TENSOR.TIME_MIX_GATE:             "blk.{bid}.time_mix_gate",
     MODEL_TENSOR.TIME_MIX_LN:               "blk.{bid}.time_mix_ln",
     MODEL_TENSOR.TIME_MIX_OUTPUT:           "blk.{bid}.time_mix_output",
+    MODEL_TENSOR.TIME_TINY_Q:               "blk.{bid}.time_mix_tiny_q", # for tica
+    MODEL_TENSOR.TIME_TINY_Q_NORM:          "blk.{bid}.time_mix_tiny_q_norm", # for tica
+    MODEL_TENSOR.TIME_TINY_K:               "blk.{bid}.time_mix_tiny_k", # for tica
+    MODEL_TENSOR.TIME_TINY_K_NORM:          "blk.{bid}.time_mix_tiny_k_norm", # for tica
+    MODEL_TENSOR.TIME_TINY_V:               "blk.{bid}.time_mix_tiny_v", # for tica
+    MODEL_TENSOR.TIME_TINY_O:               "blk.{bid}.time_mix_tiny_o", # for tica
+    MODEL_TENSOR.TIME_TINY_G1:               "blk.{bid}.time_mix_tiny_g1", # for tica
+    MODEL_TENSOR.TIME_TINY_G2:               "blk.{bid}.time_mix_tiny_g2", # for tica
     MODEL_TENSOR.CHANNEL_MIX_LERP_K:        "blk.{bid}.channel_mix_lerp_k",
     MODEL_TENSOR.CHANNEL_MIX_LERP_R:        "blk.{bid}.channel_mix_lerp_r",
     MODEL_TENSOR.CHANNEL_MIX_KEY:           "blk.{bid}.channel_mix_key",
@@ -2348,6 +2366,60 @@ MODEL_TENSORS: dict[MODEL_ARCH, list[MODEL_TENSOR]] = {
         MODEL_TENSOR.ATTN_R_NORM,
         #MODEL_TENSOR.TIME_MIX_LN, removed GroupNorm
         MODEL_TENSOR.TIME_MIX_OUTPUT,
+    ],
+    MODEL_ARCH.RWKV07IMOE: [
+
+        #from deepseek2
+        MODEL_TENSOR.TOKEN_EMBD,
+        MODEL_TENSOR.OUTPUT_NORM,
+        MODEL_TENSOR.OUTPUT,
+        MODEL_TENSOR.ROPE_FREQS,
+        MODEL_TENSOR.ATTN_NORM,
+        MODEL_TENSOR.ATTN_Q,
+        MODEL_TENSOR.ATTN_Q_A,
+        MODEL_TENSOR.ATTN_Q_B,
+        MODEL_TENSOR.ATTN_KV_A_MQA,
+        MODEL_TENSOR.ATTN_KV_B,
+        MODEL_TENSOR.ATTN_K_B,
+        MODEL_TENSOR.ATTN_V_B,
+        MODEL_TENSOR.ATTN_Q_A_NORM,
+        MODEL_TENSOR.ATTN_KV_A_NORM,
+        MODEL_TENSOR.ATTN_OUT,
+        MODEL_TENSOR.ATTN_ROT_EMBD,
+        MODEL_TENSOR.FFN_GATE_INP,
+        MODEL_TENSOR.FFN_NORM,
+        MODEL_TENSOR.FFN_GATE,
+        MODEL_TENSOR.FFN_DOWN,
+        MODEL_TENSOR.FFN_UP,
+        MODEL_TENSOR.FFN_GATE_EXP,
+        MODEL_TENSOR.FFN_DOWN_EXP,
+        MODEL_TENSOR.FFN_UP_EXP,
+        MODEL_TENSOR.FFN_GATE_SHEXP,
+        MODEL_TENSOR.FFN_DOWN_SHEXP,
+        MODEL_TENSOR.FFN_UP_SHEXP,
+        MODEL_TENSOR.FFN_EXP_PROBS_B,
+
+        #RWKV Block
+        MODEL_TENSOR.TIME_MIX_W0,
+        MODEL_TENSOR.TIME_MIX_W1,
+        MODEL_TENSOR.TIME_MIX_W2,
+        MODEL_TENSOR.TIME_MIX_A0,
+        MODEL_TENSOR.TIME_MIX_A1,
+        MODEL_TENSOR.TIME_MIX_A2,
+        MODEL_TENSOR.TIME_MIX_G1,
+        MODEL_TENSOR.TIME_MIX_G2,
+
+        MODEL_TENSOR.TIME_TINY_Q,
+        MODEL_TENSOR.TIME_TINY_K,
+        MODEL_TENSOR.TIME_TINY_V,
+        MODEL_TENSOR.TIME_TINY_O,
+
+        MODEL_TENSOR.TIME_TINY_Q_NORM,
+        MODEL_TENSOR.TIME_TINY_K_NORM,
+
+        MODEL_TENSOR.TIME_TINY_G1,
+        MODEL_TENSOR.TIME_TINY_G2,
+
     ],
     MODEL_ARCH.MAMBA: [
         MODEL_TENSOR.TOKEN_EMBD,

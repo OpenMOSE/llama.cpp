@@ -37,7 +37,7 @@ uint32_t llama_hparams::n_head(uint32_t il) const {
 
 uint32_t llama_hparams::n_head_kv(uint32_t il) const {
     if (il < n_layer) {
-        return n_head_kv_arr[il];
+        return 2;//n_head_kv_arr[il];
     }
 
     GGML_ABORT("fatal error");

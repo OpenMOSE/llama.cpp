@@ -2952,7 +2952,8 @@ struct ggml_cplan ggml_graph_plan(
                     {
                         if (node->src[5] == NULL) {
                             // in-op selection scratch, shared by every thread
-                            cur += sizeof(int32_t)*ggml_get_op_params_i32(node, 2);
+                            const int n_sets = ggml_get_op_params_i32(node, 3) ? node->src[1]->ne[2] : 1;
+                            cur += sizeof(int32_t)*ggml_get_op_params_i32(node, 2)*n_sets;
                         }
                     } break;
                 case GGML_OP_FLASH_ATTN_EXT:

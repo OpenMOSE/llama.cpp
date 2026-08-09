@@ -422,6 +422,8 @@ public:
     ggml_tensor * lod_meta = nullptr; // I32 [1] = n_past, read by the fused op at compute time
     ggml_tensor * lod_arange = nullptr; // I32 [n_exact_pad] = tail_start+i, for quantized-cache dequant reads
     ggml_tensor * lod_catchup = nullptr; // I32 [catchup_len] = sums_pos+i, lazy page-sum rebuild after dense-path ubatches
+    ggml_tensor * lod_pmeta   = nullptr; // F32 [1] = runtime complete pages (static prefill graphs)
+    ggml_tensor * lod_pageidx = nullptr; // I32 [n_full*Hkv] page-sum row ids for the fold scatter
 
     // which memory type wraps the LoD base cache (needed to re-resolve mctx on graph reuse)
     enum lod_parent_t { LOD_PARENT_PLAIN, LOD_PARENT_ISWA, LOD_PARENT_HYBRID };
@@ -430,6 +432,8 @@ public:
     // ubatch geometry, fixed at graph build (prev_end advances on reuse)
     uint32_t ps = 0, prev_end = 0, tail_start = 0, n_exact_pad = 0, P_full = 0, kP = 0, NL = 0;
     uint32_t catchup_p0 = 0, catchup_len = 0;
+    uint32_t P_cap = 0, n_full = 0; // static-prefill geometry (stat_fa)
+    bool     stat_fa = false;       // capacity-padded FA graph, reusable across ubatches
 
     const llama_hparams hparams;
     const llama_cparams cparams;

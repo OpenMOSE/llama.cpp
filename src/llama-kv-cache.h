@@ -198,6 +198,9 @@ public:
     // page-sum storage view [n_embd_head, np, n_head_kv] starting at page p0
     ggml_tensor * get_k_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np, uint32_t strm) const;
     ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np, uint32_t strm) const;
+    // full-capacity page-sum rows [D, P_cap*Hkv] (row = p + P_cap*kv), for set_rows scatter
+    ggml_tensor * get_k_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_v_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
@@ -422,6 +425,8 @@ public:
     ggml_tensor * get_v_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
     ggml_tensor * get_k_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
     ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
+    ggml_tensor * get_k_page_sumrows(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_v_page_sumrows(ggml_context * ctx, int32_t il) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory

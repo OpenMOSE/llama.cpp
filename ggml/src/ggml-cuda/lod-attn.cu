@@ -22,7 +22,7 @@ template <int tile_sz>
 static __global__ void lod_attn_split_f(
         const char * __restrict__ q,  const char * __restrict__ k,  const char * __restrict__ v,
         const char * __restrict__ ks, const char * __restrict__ vs,
-        const int  * __restrict__ sel, const int * __restrict__ st,
+        const int  * __restrict__ sel_in, const int * __restrict__ st,
         float      * __restrict__ part, // [n_rows, S, 2 + Dv]
         const int Dk, const int Dv, const int Hq, const int Hkv,
         const int P, const int n_sel, const int ps,
@@ -31,7 +31,8 @@ static __global__ void lod_attn_split_f(
         const uint64_t v_nb1,  const uint64_t v_nb2,
         const uint64_t ks_nb1, const uint64_t ks_nb2,
         const uint64_t vs_nb1, const uint64_t vs_nb2,
-        const float scale, const float logn, const int k_f16, const int v_f16) {
+        const float scale, const float logn, const int k_f16, const int v_f16,
+        const int sel_head) {
     const int row = blockIdx.x; // qi*(Hq/HPT) + hpair
     const int spl = blockIdx.y;
 
@@ -42,6 +43,8 @@ static __global__ void lod_attn_split_f(
 
     const int lane = threadIdx.x%tile_sz;
     const int tile = threadIdx.x/tile_sz;
+
+    const int * sel = sel_in + (sel_head ? hk*n_sel : 0);
 
     const int prev_end = st[0];
     const int Pr       = st[1];                  // complete pages to read
@@ -375,7 +378,8 @@ static __global__ void lod_attn_score_fold_f(
 
 static __global__ void lod_attn_topk_sort(
         const float * __restrict__ scores, int * __restrict__ sel,
-        const int * __restrict__ st, const int n_top, const int P, const int Hkv) {
+        const int * __restrict__ st, const int n_top, const int P, const int Hkv,
+        const int sel_head) {
     const int Pr = st[1];
 
     __shared__ float sv[LOD_TOPK_SORT_MAX];
@@ -389,8 +393,12 @@ static __global__ void lod_attn_topk_sort(
     for (int i = threadIdx.x; i < n; i += blockDim.x) {
         float v = -INFINITY;
         if (i < Pr) {
-            for (int kv = 0; kv < Hkv; ++kv) {
-                v = fmaxf(v, scores[(uint64_t) kv*P + i]);
+            if (sel_head) {
+                v = scores[(uint64_t) blockIdx.x*P + i]; // this block's KV head row
+            } else {
+                for (int kv = 0; kv < Hkv; ++kv) {
+                    v = fmaxf(v, scores[(uint64_t) kv*P + i]);
+                }
             }
         }
         sv[i] = v;
@@ -416,34 +424,39 @@ static __global__ void lod_attn_topk_sort(
     }
 
     for (int i = threadIdx.x; i < n_top; i += blockDim.x) {
-        sel[i] = i < Pr ? si[i] : -1;
+        sel[blockIdx.x*n_top + i] = i < Pr ? si[i] : -1;
     }
 }
 
 // fallback above the sort capacity: iterative extraction
 static __global__ void lod_attn_topk(
         float * __restrict__ scores, int * __restrict__ sel,
-        const int * __restrict__ st, const int n_top, const int P, const int Hkv) {
+        const int * __restrict__ st, const int n_top, const int P, const int Hkv,
+        const int sel_head) {
     const int Pr = st[1];
 
     __shared__ float sm_v[256];
     __shared__ int   sm_i[256];
 
-    for (int i = threadIdx.x; i < Pr; i += blockDim.x) {
-        float v = scores[i];
-        for (int kv = 1; kv < Hkv; ++kv) {
-            v = fmaxf(v, scores[(uint64_t) kv*P + i]);
+    float * row = scores + (uint64_t) blockIdx.x*P; // this block's set (row 0 when shared)
+
+    if (!sel_head) {
+        for (int i = threadIdx.x; i < Pr; i += blockDim.x) {
+            float v = row[i];
+            for (int kv = 1; kv < Hkv; ++kv) {
+                v = fmaxf(v, scores[(uint64_t) kv*P + i]);
+            }
+            row[i] = v;
         }
-        scores[i] = v;
+        __syncthreads();
     }
-    __syncthreads();
 
     for (int it = 0; it < n_top; ++it) {
         float bv = -INFINITY;
         int   bi = -1;
         for (int p = threadIdx.x; p < Pr; p += blockDim.x) {
-            if (scores[p] > bv) {
-                bv = scores[p];
+            if (row[p] > bv) {
+                bv = row[p];
                 bi = p;
             }
         }
@@ -462,9 +475,9 @@ static __global__ void lod_attn_topk(
             __syncthreads();
         }
         if (threadIdx.x == 0) {
-            sel[it] = sm_i[0];
+            sel[blockIdx.x*n_top + it] = sm_i[0];
             if (sm_i[0] >= 0) {
-                scores[sm_i[0]] = -INFINITY;
+                row[sm_i[0]] = -INFINITY;
             }
         }
         __syncthreads();
@@ -592,8 +605,11 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         // in-op selection: pooled page scores + fold in one launch, then a tiny top-k
         n_sel = ggml_get_op_params_i32(dst, 2);
 
+        const int sel_head = ggml_get_op_params_i32(dst, 3);
+        const int n_sets   = sel_head ? Hkv : 1;
+
         ws_scores.alloc((size_t) P*Hkv);
-        ws_sel.alloc(n_sel);
+        ws_sel.alloc((size_t) n_sel*n_sets);
 
         const auto launch_score = [&](auto tile_tag) {
             constexpr int TS = decltype(tile_tag)::value;
@@ -615,9 +631,9 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         }
 
         if (P <= LOD_TOPK_SORT_MAX) {
-            lod_attn_topk_sort<<<1, 256, 0, stream>>>(ws_scores.get(), ws_sel.get(), (const int *) st->data, n_sel, P, Hkv);
+            lod_attn_topk_sort<<<n_sets, 256, 0, stream>>>(ws_scores.get(), ws_sel.get(), (const int *) st->data, n_sel, P, Hkv, sel_head);
         } else {
-            lod_attn_topk<<<1, 256, 0, stream>>>(ws_scores.get(), ws_sel.get(), (const int *) st->data, n_sel, P, Hkv);
+            lod_attn_topk<<<n_sets, 256, 0, stream>>>(ws_scores.get(), ws_sel.get(), (const int *) st->data, n_sel, P, Hkv, sel_head);
         }
 
         sel_ptr = ws_sel.get();
@@ -637,7 +653,8 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                 Dk, Dv, Hq, Hkv, P, n_sel, ps,
                 q->nb[1],  q->nb[2],  k->nb[1],  k->nb[2],  v->nb[1], v->nb[2],
                 ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
-                scale, logf((float) ps), k_f16, v_f16);
+                scale, logf((float) ps), k_f16, v_f16,
+                sel == nullptr ? ggml_get_op_params_i32(dst, 3) : 0);
     };
     if (warp_size == 64) {
         launch_split(std::integral_constant<int, 64>{});

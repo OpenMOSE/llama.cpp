@@ -11974,36 +11974,47 @@ void ggml_compute_forward_lod_attn(
         }
 
         // in-op selection: top n_sel pages by query/head-max-pooled raw score
-        // (ranking is scale-invariant, so the un-normalized sums are used directly)
+        // (ranking is scale-invariant, so the un-normalized sums are used directly);
+        // with sel_head one independent set per KV head (heads of its GQA group only)
         if (sel == NULL) {
+            const bool    sel_head = ggml_get_op_params_i32(dst, 3) != 0;
+            const int64_t n_sets   = sel_head ? Hkv : 1;
+            const int64_t Hq       = q->ne[2];
+            const int64_t gq       = Hq/Hkv;
+
             int32_t * sel_ws = (int32_t *) params->wdata;
 
-            std::vector<float> sc(P);
-            for (int64_t p = 0; p < P; ++p) {
-                float best = -INFINITY;
-                for (int64_t h = 0; h < q->ne[2]; ++h) {
-                    const float * ksp = (const float *)((const char *) ks->data + p*ks->nb[1] + (h/(q->ne[2]/Hkv))*ks->nb[2]);
-                    for (int64_t qi = 0; qi < nq; ++qi) {
-                        const float * qp = (const float *)((const char *) q->data + qi*q->nb[1] + h*q->nb[2]);
-                        float s = 0.0f;
-                        for (int64_t d = 0; d < Dk; ++d) {
-                            s += qp[d]*ksp[d];
-                        }
-                        best = MAX(best, s);
-                    }
-                }
-                sc[p] = best;
-            }
-            for (int64_t i = 0; i < n_sel; ++i) {
-                int64_t bi = -1;
+            for (int64_t set = 0; set < n_sets; ++set) {
+                const int64_t h0 = sel_head ? set*gq : 0;
+                const int64_t h1 = sel_head ? (set + 1)*gq : Hq;
+
+                std::vector<float> sc(P);
                 for (int64_t p = 0; p < P; ++p) {
-                    if (sc[p] > -INFINITY && (bi < 0 || sc[p] > sc[bi])) {
-                        bi = p;
+                    float best = -INFINITY;
+                    for (int64_t h = h0; h < h1; ++h) {
+                        const float * ksp = (const float *)((const char *) ks->data + p*ks->nb[1] + (h/gq)*ks->nb[2]);
+                        for (int64_t qi = 0; qi < nq; ++qi) {
+                            const float * qp = (const float *)((const char *) q->data + qi*q->nb[1] + h*q->nb[2]);
+                            float s = 0.0f;
+                            for (int64_t d = 0; d < Dk; ++d) {
+                                s += qp[d]*ksp[d];
+                            }
+                            best = MAX(best, s);
+                        }
                     }
+                    sc[p] = best;
                 }
-                sel_ws[i] = (int32_t) bi;
-                if (bi >= 0) {
-                    sc[bi] = -INFINITY;
+                for (int64_t i = 0; i < n_sel; ++i) {
+                    int64_t bi = -1;
+                    for (int64_t p = 0; p < P; ++p) {
+                        if (sc[p] > -INFINITY && (bi < 0 || sc[p] > sc[bi])) {
+                            bi = p;
+                        }
+                    }
+                    sel_ws[set*n_sel + i] = (int32_t) bi;
+                    if (bi >= 0) {
+                        sc[bi] = -INFINITY;
+                    }
                 }
             }
         }
@@ -12017,7 +12028,8 @@ void ggml_compute_forward_lod_attn(
     GGML_ASSERT(k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
     GGML_ASSERT(v->type == GGML_TYPE_F32 || v->type == GGML_TYPE_F16);
 
-    const int32_t * sel_d = sel ? (const int32_t *) sel->data : (const int32_t *) params->wdata;
+    const int32_t * sel_d    = sel ? (const int32_t *) sel->data : (const int32_t *) params->wdata;
+    const bool      sel_rows = sel == NULL && ggml_get_op_params_i32(dst, 3) != 0;
 
     const bool k_f16 = k->type == GGML_TYPE_F16;
     const bool v_f16 = v->type == GGML_TYPE_F16;
@@ -12032,6 +12044,8 @@ void ggml_compute_forward_lod_attn(
         const float * qp = (const float *)((const char *) q->data + qi*q->nb[1] + h*q->nb[2]);
 
         const int64_t limit = prev_end + qi; // last visible position, inclusive
+
+        const int32_t * sel_r = sel_d + (sel_rows ? hk*n_sel : 0);
 
         float m   = -INFINITY;
         float den = 0.0f;
@@ -12085,7 +12099,7 @@ void ggml_compute_forward_lod_attn(
         for (int64_t p = 0; p < P; ++p) {
             bool selected = false;
             for (int64_t i = 0; i < n_sel; ++i) {
-                if (sel_d[i] == p) {
+                if (sel_r[i] == p) {
                     selected = true;
                     break;
                 }
@@ -12103,7 +12117,7 @@ void ggml_compute_forward_lod_attn(
 
         // tier 2: leaves of the selected pages, read exactly from the cache
         for (int64_t i = 0; i < n_sel; ++i) {
-            const int64_t p = sel_d[i];
+            const int64_t p = sel_r[i];
             if (p < 0) {
                 continue; // in-op selection pads with -1 when fewer pages exist
             }

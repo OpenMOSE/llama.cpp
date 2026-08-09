@@ -2627,7 +2627,8 @@ extern "C" {
         struct ggml_tensor  * state,
         int                   page_size,
         float                 scale,
-        int                   n_top);
+        int                   n_top,
+        bool                  sel_head); // in-op selection per KV head (else one shared set)
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)

@@ -108,8 +108,12 @@ are from adjacent same-condition runs)
 With `-ctk q8_0 -ctv q8_0` (gemma): prefill identical to the F16 LoD numbers, PPL parity,
 full-attention KV footprint ~0.53x (q4_0: ~0.28x).
 
-Note: benchmark with a single GPU pinned (`HIP_VISIBLE_DEVICES=0`); with layer-split
-multi-GPU the per-layer LoD inputs are broadcast to every device (unoptimized).
+Multi-GPU (`-sm layer`): prefill pipelines across devices like dense. The mask and the
+page-tier shapes are generated on-device at fixed capacity, so the prefill graph is
+static; under pipeline parallelism the graph takes the rebuild path (reuse would force
+a scheduler sync per ubatch), on a single GPU it is reused. Measured pp16384 @ depth
+16k: LoD 2682 t/s on 1 GPU -> 4183 t/s on 2 GPUs (1.56x; dense scales 1702 -> 2977).
+TG does not scale with layer split for dense or LoD (sequential layer chain).
 
 ## Code map
 

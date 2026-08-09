@@ -561,8 +561,8 @@ static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_
     ggml_tensor * st   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
     ggml_tensor * selx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_top);
 
-    ggml_tensor * out_a = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, scale, (int) n_top);
-    ggml_tensor * out_b = ggml_lod_attn(ctx, q, k, v, ks, vs, selx, st, (int) ps, scale, 0);
+    ggml_tensor * out_a = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, scale, (int) n_top, false);
+    ggml_tensor * out_b = ggml_lod_attn(ctx, q, k, v, ks, vs, selx, st, (int) ps, scale, 0, false);
 
     ggml_cgraph * gfa = ggml_new_graph(ctx);
     ggml_cgraph * gfb = ggml_new_graph(ctx);
@@ -653,7 +653,7 @@ static void run_bench(ggml_backend_t backend) {
     ggml_tensor * vs = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
     ggml_tensor * st = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
 
-    ggml_tensor * out = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, 1.0f/sqrtf((float) D), (int) n_top);
+    ggml_tensor * out = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, 1.0f/sqrtf((float) D), (int) n_top, false);
 
     ggml_cgraph * gf = ggml_new_graph(ctx);
     ggml_build_forward_expand(gf, out);
@@ -749,6 +749,16 @@ int main(void) {
             const int r = run_fused_case({ 64, 2, 2, 16, 4000, 5, 1, 0, false, GGML_TYPE_F16 }, backend, 32);
             if (r > 0) fails++;
             if (r < 0) unsupported++;
+        }
+        // real model head geometries: gemma4 full layers (D=512) and qwen3.6 (D=256)
+        for (const lod_case & fc : { lod_case { 512, 4, 8, 64, 8, 33, 1, 0, false, GGML_TYPE_F16 },
+                                     lod_case { 512, 4, 8, 64, 8, 33, 4, 0, false, GGML_TYPE_F16 },
+                                     lod_case { 256, 4, 6, 64, 8, 33, 1, 0, false, GGML_TYPE_F16 } }) {
+            for (int64_t n_top : { (int64_t) 3, (int64_t) 8 }) {
+                const int r = run_fused_case(fc, backend, n_top);
+                if (r > 0) fails++;
+                if (r < 0) unsupported++;
+            }
         }
         if (unsupported > 0) {
             printf("  (%d cases skipped for missing op support)\n", unsupported);

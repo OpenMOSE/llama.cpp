@@ -1443,6 +1443,24 @@ ggml_tensor * llama_kv_cache::get_k_page_sums(ggml_context * ctx, int32_t il, ui
     return ggml_view_3d(ctx, kp, kp->ne[0], np, kp->ne[2], kp->nb[1], kp->nb[2], p0*kp->nb[1] + strm*kp->nb[3]);
 }
 
+ggml_tensor * llama_kv_cache::get_k_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    const int32_t ikv = map_layer_ids.at(il);
+
+    auto * kp = layers[ikv].k_page;
+    GGML_ASSERT(kp != nullptr);
+
+    return ggml_view_2d(ctx, kp, kp->ne[0], kp->ne[1]*kp->ne[2], kp->nb[1], strm*kp->nb[3]);
+}
+
+ggml_tensor * llama_kv_cache::get_v_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    const int32_t ikv = map_layer_ids.at(il);
+
+    auto * vp = layers[ikv].v_page;
+    GGML_ASSERT(vp != nullptr);
+
+    return ggml_view_2d(ctx, vp, vp->ne[0], vp->ne[1]*vp->ne[2], vp->nb[1], strm*vp->nb[3]);
+}
+
 ggml_tensor * llama_kv_cache::get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np, uint32_t strm) const {
     const int32_t ikv = map_layer_ids.at(il);
 
@@ -2814,6 +2832,14 @@ ggml_tensor * llama_kv_cache_context::get_k_page_sums(ggml_context * ctx, int32_
 
 ggml_tensor * llama_kv_cache_context::get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const {
     return kv->get_v_page_sums(ctx, il, p0, np, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_page_sumrows(ggml_context * ctx, int32_t il) const {
+    return kv->get_k_page_sumrows(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_page_sumrows(ggml_context * ctx, int32_t il) const {
+    return kv->get_v_page_sumrows(ctx, il, get_stream());
 }
 
 ggml_tensor * llama_kv_cache_context::cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il) const {

@@ -409,17 +409,52 @@ void llama_kv_cache::clear(bool data) {
 }
 
 void llama_kv_cache::clear_lod_sums() {
-    // lazy: stale sums are rebuilt from the cache before the next LoD read
+    // the folds are read-modify-write, so rewound rows must be physically zeroed -
+    // a bare counter reset leaves stale mass that the next fold would double-count
+    for (uint32_t strm = 0; strm < (uint32_t) lod_sums_pos.size(); ++strm) {
+        lod_zero_sums(0, UINT32_MAX, strm);
+    }
     lod_sums_pos.assign(lod_sums_pos.size(), 0);
 }
 
-// suffix removal at position p0: the folded-sums position simply moves back, the
-// next LoD read rebuilds whatever is missing from the cache
+// zero the folded page-sum rows [p_lo, p_hi) of one stream, all LoD layers
+void llama_kv_cache::lod_zero_sums(uint32_t p_lo, uint32_t p_hi, uint32_t strm) {
+    for (const auto & layer : layers) {
+        for (ggml_tensor * t : { layer.k_page, layer.v_page }) {
+            if (t == nullptr) {
+                continue;
+            }
+            const uint32_t lo = std::min<uint32_t>(p_lo, t->ne[1]);
+            const uint32_t hi = std::min<uint32_t>(p_hi, t->ne[1]);
+            if (hi <= lo) {
+                continue;
+            }
+            // pages are contiguous within one KV head (nb[1] == row size)
+            const std::vector<uint8_t> zeros((size_t) (hi - lo)*t->nb[1], 0);
+            for (int64_t h = 0; h < t->ne[2]; ++h) {
+                ggml_backend_tensor_set(t, zeros.data(), (size_t) lo*t->nb[1] + h*t->nb[2] + strm*t->nb[3], zeros.size());
+            }
+        }
+    }
+}
+
+// suffix removal at position p0: rewind to the page floor and zero every page row
+// that held folded mass past it - the next LoD read refolds them from the cache
 void llama_kv_cache::lod_truncate_sums(uint32_t p0, uint32_t strm) {
     GGML_ASSERT(lod_page_size > 0);
     GGML_ASSERT(strm < lod_sums_pos.size());
 
-    lod_sums_pos[strm] = std::min(lod_sums_pos[strm], p0);
+    const uint32_t old_pos = lod_sums_pos[strm];
+    if (p0 >= old_pos) {
+        return; // nothing folded beyond p0
+    }
+
+    const uint32_t p_lo = p0/lod_page_size;
+    const uint32_t p_hi = (old_pos + lod_page_size - 1)/lod_page_size;
+
+    lod_zero_sums(p_lo, p_hi, strm);
+
+    lod_sums_pos[strm] = p_lo*lod_page_size; // the partial page refolds from scratch
 }
 
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
@@ -435,8 +470,12 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
 
         if (p0 <= 0 && (p1 < 0 || (uint32_t) p1 >= used)) {
             if (seq_id < 0) {
+                for (uint32_t s = 0; s < (uint32_t) lod_sums_pos.size(); ++s) {
+                    lod_zero_sums(0, UINT32_MAX, s);
+                }
                 lod_sums_pos.assign(lod_sums_pos.size(), 0);
             } else {
+                lod_zero_sums(0, UINT32_MAX, strm);
                 lod_sums_pos[strm] = 0;
             }
         } else if (p1 < 0 || (uint32_t) p1 >= used) {

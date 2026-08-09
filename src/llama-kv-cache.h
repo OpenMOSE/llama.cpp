@@ -164,6 +164,7 @@ public:
     uint32_t get_lod_page_size() const { return lod_page_size; }
     void     clear_lod_sums();
     void     lod_truncate_sums(uint32_t p0, uint32_t strm);
+    void     lod_zero_sums(uint32_t p_lo, uint32_t p_hi, uint32_t strm);
     uint32_t get_lod_sums_pos(uint32_t strm) const { return lod_sums_pos[strm]; }
     void     lod_note_sums(uint32_t strm, uint32_t pos) { lod_sums_pos[strm] = pos; }
 

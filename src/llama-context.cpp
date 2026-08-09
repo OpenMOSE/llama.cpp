@@ -262,7 +262,8 @@ llama_context::llama_context(
                 __func__, cparams.lod_page_size, cparams.lod_top_pages);
 
         if (cparams.n_seq_max > 1) {
-            throw std::runtime_error("LoD attention requires n_seq_max == 1");
+            // one active sequence at a time is required; cell contiguity is asserted at run time
+            LLAMA_LOG_WARN("%s: LoD attention supports a single active sequence - use one slot (-np 1)\n", __func__);
         }
     }
 

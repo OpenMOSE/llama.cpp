@@ -613,6 +613,17 @@ void llm_graph_input_attn_lod::set_input(const llama_ubatch * ubatch) {
         }
         ggml_backend_tensor_set(lod_arange, idx.data(), 0, ggml_nbytes(lod_arange));
     }
+
+    if (lod_catchup) {
+        std::vector<int32_t> idx(catchup_len);
+        for (uint32_t i = 0; i < catchup_len; ++i) {
+            idx[i] = catchup_p0 + i;
+        }
+        ggml_backend_tensor_set(lod_catchup, idx.data(), 0, ggml_nbytes(lod_catchup));
+    }
+
+    // after this graph runs, the sums cover everything up to the end of the ubatch
+    mctx->lod_note_sums(prev_end + n_tokens);
 }
 
 bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
@@ -634,6 +645,9 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
 
     const uint32_t P_new = prev_end_new / ps;
 
+    res &= base->is_single_stream_contig();
+    res &= base->get_lod_sums_pos() >= prev_end_new; // no pending catch-up
+    res &= catchup_len == 0;
     res &= std::min(cparams.lod_top_pages, P_new) == kP;
 
     // the fused path takes its geometry from lod_meta at run time; the other paths bake
@@ -3299,6 +3313,12 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     GGML_ASSERT(mctx_base->is_lod());
     GGML_ASSERT(cparams.lod_top_pages > 0);
 
+    // mixed-stream ubatches (several server slots batched together) fall back to the
+    // dense path - coherent, since the cache holds exactly what dense would hold
+    if (!mctx_base->is_single_stream_contig()) {
+        return nullptr;
+    }
+
     auto inp = std::make_unique<llm_graph_input_attn_lod>(hparams, cparams, mctx_base);
 
     const uint32_t ps       = mctx_base->get_lod_page_size();
@@ -3312,8 +3332,13 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     inp->kP         = std::min(cparams.lod_top_pages, inp->P_full);
     inp->NL         = inp->kP * ps;
 
+    // reserve/probe graphs run set_input on dummy state, so the counter can be ahead;
+    // ahead is harmless (the current-ubatch fold always runs from prev_end)
+    inp->catchup_p0  = std::min(mctx_base->get_lod_sums_pos(), prev_end);
+    inp->catchup_len = prev_end - inp->catchup_p0;
+
     // padded so that the graph shape stays fixed while decode fills the current page
-    inp->n_exact_pad = std::min<uint32_t>(ps + n_tokens, cparams.n_ctx - inp->tail_start);
+    inp->n_exact_pad = std::min<uint32_t>(ps + n_tokens, cparams.n_ctx_seq - inp->tail_start);
     GGML_ASSERT(inp->n_exact_pad >= prev_end + n_tokens - inp->tail_start);
 
     inp->self_k_idxs = mctx_base->build_input_k_idxs(ctx0, ubatch);
@@ -3333,11 +3358,17 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
         ggml_set_name(inp->lod_mask, "lod_mask");
     }
 
-    if (n_tokens > 1 && !use_fused_pre) {
+    if ((n_tokens > 1 && !use_fused_pre) || inp->catchup_len > 0) {
         // the fused op folds the sums itself; single-token updates reduce to a plain add
         inp->lod_ones = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, ps);
         ggml_set_input(inp->lod_ones);
         ggml_set_name(inp->lod_ones, "lod_ones");
+    }
+
+    if (inp->catchup_len > 0) {
+        inp->lod_catchup = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, inp->catchup_len);
+        ggml_set_input(inp->lod_catchup);
+        ggml_set_name(inp->lod_catchup, "lod_catchup");
     }
 
     if (use_fused_pre) {
@@ -3411,7 +3442,7 @@ ggml_tensor * llm_graph_context::build_attn(
 
     // fold this ubatch into the page sums; sums accumulate from the raw (pre-quantization) K/V
     {
-        auto update_sums = [&](ggml_tensor * cur, bool is_v) {
+        auto update_sums = [&](ggml_tensor * cur, bool is_v, uint32_t t_start, uint32_t t_len) {
             auto get_sums = [&](uint32_t p0, uint32_t np) {
                 return is_v ? mctx_cur->get_v_page_sums(ctx0, il, p0, np)
                             : mctx_cur->get_k_page_sums(ctx0, il, p0, np);
@@ -3420,6 +3451,7 @@ ggml_tensor * llm_graph_context::build_attn(
 
             // sum a token range of cur over the token axis -> [D, 1, n_head_kv]
             auto range_sum = [&](uint32_t t0, uint32_t len) {
+                GGML_ASSERT(t0 + len <= t_len);
                 ggml_tensor * slice = ggml_view_3d(ctx0, cur, D, n_head_kv, len, cur->nb[1], cur->nb[2], t0*cur->nb[2]);
                 // mul_mat needs row-contiguous operands, so materialize the [len, D, n_head_kv] permutation
                 ggml_tensor * perm  = ggml_cont(ctx0, ggml_permute(ctx0, slice, 1, 2, 0, 3));
@@ -3430,18 +3462,20 @@ ggml_tensor * llm_graph_context::build_attn(
 
             // partial edge page: read-modify-write its running sum
             auto edge = [&](uint32_t p, uint32_t t0g, uint32_t t1g) {
-                ggml_tensor * part = range_sum(t0g - prev_end, t1g - t0g);
+                ggml_tensor * part = range_sum(t0g - t_start, t1g - t0g);
                 ggml_tensor * old  = ggml_cont(ctx0, get_sums(p, 1));
                 ggml_tensor * next = ggml_add(ctx0, part, old);
                 ggml_build_forward_expand(gf, ggml_cpy(ctx0, next, get_sums(p, 1)));
             };
 
-            const uint32_t pa  = prev_end / ps;       // page the ubatch starts in
-            const uint32_t pt  = new_end / ps;        // page the ubatch ends in (exclusive end)
-            const uint32_t pfa = (prev_end + ps - 1) / ps;
-            const uint32_t pfb = new_end / ps;
+            const uint32_t t_end = t_start + t_len;
 
-            if (n_tokens == 1) {
+            const uint32_t pa  = t_start / ps;        // page the range starts in
+            const uint32_t pt  = t_end / ps;          // page the range ends in (exclusive end)
+            const uint32_t pfa = (t_start + ps - 1) / ps;
+            const uint32_t pfb = t_end / ps;
+
+            if (t_len == 1) {
                 // decode: one token lands in one page, the update is a plain add
                 ggml_tensor * dst_row = get_sums(pa, 1);                              // [D, 1, Hkv]
                 ggml_tensor * add_row = ggml_reshape_3d(ctx0, cur, D, 1, n_head_kv);  // same layout
@@ -3449,20 +3483,20 @@ ggml_tensor * llm_graph_context::build_attn(
                 return;
             }
 
-            if (prev_end % ps != 0 && pa == (new_end - 1) / ps) {
-                // the whole ubatch lands inside one already-started page
-                edge(pa, prev_end, new_end);
+            if (t_start % ps != 0 && pa == (t_end - 1) / ps) {
+                // the whole range lands inside one already-started page
+                edge(pa, t_start, t_end);
                 return;
             }
 
-            if (prev_end % ps != 0) {
-                edge(pa, prev_end, pfa*ps);
+            if (t_start % ps != 0) {
+                edge(pa, t_start, pfa*ps);
             }
 
             if (pfb > pfa) {
-                // pages fully covered by this ubatch: one batched reduction
+                // pages fully covered by the range: one batched reduction
                 const uint32_t nfull = pfb - pfa;
-                const uint32_t l0    = pfa*ps - prev_end;
+                const uint32_t l0    = pfa*ps - t_start;
 
                 ggml_tensor * region = ggml_view_3d(ctx0, cur, D, n_head_kv, nfull*ps, cur->nb[1], cur->nb[2], l0*cur->nb[2]);
                 region = ggml_reshape_4d(ctx0, region, D, n_head_kv, ps, nfull);
@@ -3475,15 +3509,28 @@ ggml_tensor * llm_graph_context::build_attn(
                 ggml_build_forward_expand(gf, ggml_cpy(ctx0, sums, get_sums(pfa, nfull)));
             }
 
-            if (new_end % ps != 0 && pt >= pfa) {
+            if (t_end % ps != 0 && pt >= pfa) {
                 // freshly started trailing page (its old sum is zero, RMW keeps it general)
-                edge(pt, pt*ps, new_end);
+                edge(pt, pt*ps, t_end);
             }
         };
 
+        // lazy catch-up: fold tokens processed by dense-path ubatches (other server slots
+        // batched in) from the cache before folding the current ubatch
+        if (inp->catchup_len > 0) {
+            ggml_tensor * ck = ggml_get_rows(ctx0, mctx_cur->get_k_tokrows(ctx0, il, cparams.n_ctx_seq), inp->lod_catchup);
+            ggml_tensor * cv = ggml_get_rows(ctx0, mctx_cur->get_v_tokrows(ctx0, il, cparams.n_ctx_seq), inp->lod_catchup);
+
+            const int64_t Dk = k_cur->ne[0];
+            const int64_t Dv = v_cur->ne[0];
+
+            update_sums(ggml_reshape_3d(ctx0, ck, Dk, n_head_kv, inp->catchup_len), false, inp->catchup_p0, inp->catchup_len);
+            update_sums(ggml_reshape_3d(ctx0, cv, Dv, n_head_kv, inp->catchup_len), true,  inp->catchup_p0, inp->catchup_len);
+        }
+
         if (!use_fused) {
-            update_sums(k_cur, false);
-            update_sums(v_cur, true);
+            update_sums(k_cur, false, prev_end, n_tokens);
+            update_sums(v_cur, true,  prev_end, n_tokens);
         }
     }
 
@@ -3580,8 +3627,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * ke;
         ggml_tensor * ve;
         if (q_cache) {
-            ggml_tensor * ker = ggml_get_rows(ctx0, mctx_cur->get_k_tokrows(ctx0, il, cparams.n_ctx), inp->lod_arange);
-            ggml_tensor * ver = ggml_get_rows(ctx0, mctx_cur->get_v_tokrows(ctx0, il, cparams.n_ctx), inp->lod_arange);
+            ggml_tensor * ker = ggml_get_rows(ctx0, mctx_cur->get_k_tokrows(ctx0, il, cparams.n_ctx_seq), inp->lod_arange);
+            ggml_tensor * ver = ggml_get_rows(ctx0, mctx_cur->get_v_tokrows(ctx0, il, cparams.n_ctx_seq), inp->lod_arange);
 
             ke = ggml_cast(ctx0, ggml_view_3d(ctx0, ker, n_embd_head_k, n_exact, n_head_kv, ker->nb[1], n_embd_head_k*sizeof(float), 0), GGML_TYPE_F16);
             ve = ggml_cast(ctx0, ggml_view_3d(ctx0, ver, n_embd_head_v, n_exact, n_head_kv, ver->nb[1], n_embd_head_v*sizeof(float), 0), GGML_TYPE_F16);
@@ -3645,12 +3692,12 @@ ggml_tensor * llm_graph_context::build_attn(
         // travels through lod_meta, so the graph shape never changes - full reuse.
         // the op also folds the current tokens into the page sums (reading them from the
         // cache columns the write above just filled), so update_sums is skipped entirely
-        ggml_tensor * kf = mctx_cur->get_k_range(ctx0, il, 0, cparams.n_ctx);
-        ggml_tensor * vf = mctx_cur->get_v_range(ctx0, il, 0, cparams.n_ctx);
+        ggml_tensor * kf = mctx_cur->get_k_range(ctx0, il, 0, cparams.n_ctx_seq);
+        ggml_tensor * vf = mctx_cur->get_v_range(ctx0, il, 0, cparams.n_ctx_seq);
 
         cur = ggml_lod_attn(ctx0, q, kf, vf,
-                mctx_cur->get_k_page_sums(ctx0, il, 0, cparams.n_ctx/ps),
-                mctx_cur->get_v_page_sums(ctx0, il, 0, cparams.n_ctx/ps),
+                mctx_cur->get_k_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
+                mctx_cur->get_v_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
                 sel, inp->lod_meta, ps, kq_scale);
         cb(cur, "lod_fused", il);
 
@@ -3659,8 +3706,8 @@ ggml_tensor * llm_graph_context::build_attn(
         ggml_tensor * k_exact;
         ggml_tensor * v_exact_f;
         if (q_cache) {
-            ggml_tensor * ker = ggml_get_rows(ctx0, mctx_cur->get_k_tokrows(ctx0, il, cparams.n_ctx), inp->lod_arange);
-            ggml_tensor * ver = ggml_get_rows(ctx0, mctx_cur->get_v_tokrows(ctx0, il, cparams.n_ctx), inp->lod_arange);
+            ggml_tensor * ker = ggml_get_rows(ctx0, mctx_cur->get_k_tokrows(ctx0, il, cparams.n_ctx_seq), inp->lod_arange);
+            ggml_tensor * ver = ggml_get_rows(ctx0, mctx_cur->get_v_tokrows(ctx0, il, cparams.n_ctx_seq), inp->lod_arange);
 
             k_exact   = ggml_view_3d(ctx0, ker, n_embd_head_k, n_exact, n_head_kv, ker->nb[1], n_embd_head_k*sizeof(float), 0);
             v_exact_f = ggml_view_3d(ctx0, ver, n_embd_head_v, n_exact, n_head_kv, ver->nb[1], n_embd_head_v*sizeof(float), 0);

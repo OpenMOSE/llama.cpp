@@ -163,7 +163,9 @@ public:
     bool     is_lod() const { return lod_page_size > 0; }
     uint32_t get_lod_page_size() const { return lod_page_size; }
     void     clear_lod_sums();
-    void     lod_truncate_sums(uint32_t p0);
+    void     lod_truncate_sums(uint32_t p0, uint32_t strm);
+    uint32_t get_lod_sums_pos(uint32_t strm) const { return lod_sums_pos[strm]; }
+    void     lod_note_sums(uint32_t strm, uint32_t pos) { lod_sums_pos[strm] = pos; }
 
     ggml_type type_k() const;
     ggml_type type_v() const;
@@ -185,17 +187,17 @@ public:
 
     // LoD views (single stream, cells must be contiguous from 0)
     // per-head token range [t0, t0+nt): [n_embd_head, nt, n_head_kv]
-    ggml_tensor * get_k_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
-    ggml_tensor * get_v_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
+    ggml_tensor * get_k_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt, uint32_t strm) const;
+    ggml_tensor * get_v_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt, uint32_t strm) const;
     // pages as rows for ggml_get_rows: [n_embd_gqa*page_size, n_pages]
-    ggml_tensor * get_k_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;
-    ggml_tensor * get_v_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;
+    ggml_tensor * get_k_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages, uint32_t strm) const;
+    ggml_tensor * get_v_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages, uint32_t strm) const;
     // tokens as rows for ggml_get_rows: [n_embd_gqa, n]
-    ggml_tensor * get_k_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
-    ggml_tensor * get_v_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    ggml_tensor * get_k_tokrows(ggml_context * ctx, int32_t il, uint32_t n, uint32_t strm) const;
+    ggml_tensor * get_v_tokrows(ggml_context * ctx, int32_t il, uint32_t n, uint32_t strm) const;
     // page-sum storage view [n_embd_head, np, n_head_kv] starting at page p0
-    ggml_tensor * get_k_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
-    ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
+    ggml_tensor * get_k_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np, uint32_t strm) const;
+    ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np, uint32_t strm) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
@@ -264,6 +266,9 @@ private:
 
     // LoD page size (0 = disabled); when enabled the V cache is kept non-transposed
     uint32_t lod_page_size = 0;
+
+    // per-stream position up to which the page sums have been folded (lazy catch-up)
+    std::vector<uint32_t> lod_sums_pos;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
@@ -405,6 +410,10 @@ public:
     bool     is_lod() const;
     uint32_t get_lod_page_size() const;
     uint32_t get_head() const; // first cell index of the current ubatch slot
+    bool     is_single_stream_contig() const; // LoD precondition for this ubatch
+    uint32_t get_stream() const;
+    uint32_t get_lod_sums_pos() const;
+    void     lod_note_sums(uint32_t pos) const;
     ggml_tensor * get_k_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
     ggml_tensor * get_v_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
     ggml_tensor * get_k_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;

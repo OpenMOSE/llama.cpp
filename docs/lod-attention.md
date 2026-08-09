@@ -39,7 +39,9 @@ decoding (`--spec-type draft-mtp`).
 
 ### Restrictions
 
-- single sequence only (`n_seq_max == 1`); parallel slots in the server are not supported yet
+- one active sequence at a time; run `llama-server` with a single slot (`-np 1`).
+  `n_seq_max > 1` only warns, but concurrent slots would break the cache-contiguity
+  assumption (asserted at run time)
 - no context shift (the cache reports `can_shift = false`); suffix removal (prompt reuse,
   speculative rollback) is supported, mid-range removal forces a reprocess
 - `--lod-page-size` must stay in sync between runs of the same process only (no persistence)

@@ -29,9 +29,19 @@ Underlying env vars (usable directly): `LLAMA_LOD=1`, `LLAMA_LOD_TOP_PAGES`,
 `LLAMA_LOD_PAGE_SIZE`, `LLAMA_LOD_SEL`, `LLAMA_LOD_FUSED=1` (fused decode kernel; `--lod`
 turns it on by default).
 
-Supported models: **gemma4** (LoD on the non-SWA layers; SWA layers untouched) and
-**qwen35 / qwen3.6** (LoD on the full-attention layers; the GDN linear layers untouched).
-Any other model runs unmodified even with `--lod` set.
+Supported models: **gemma4** (LoD on the non-SWA layers; SWA layers untouched),
+**qwen35 / qwen3.6** and **qwen35moe** (LoD on the full-attention layers; the GDN
+linear layers untouched). Any other model runs unmodified even with `--lod` set.
+
+`llama-server` note: LoD needs per-sequence KV streams. With `-np` unset the server
+would auto-enable the unified cache, which silently falls back to the dense read on
+every ubatch - `--lod` now keeps `kv_unified = false` in that auto path, and an
+explicit `--kv-unified` logs a warning. Pass `-np N` explicitly when in doubt.
+
+Always pass `-ub 2048` (the server default is 512): LoD prefill pays a fixed
+per-ubatch cost for selection and KV assembly, and at `-ub 512` that cost dominates -
+measured at depth 64k: LoD 708 t/s at `-ub 512` vs 2546 t/s at `-ub 2048` (dense at
+`-ub 512`: 911 t/s).
 
 Works with `-fa on` (recommended), with quantized KV (`-ctk q8_0 -ctv q8_0` etc. - leaves
 and the exact tail are read through dequantizing gathers), and with MTP speculative
@@ -119,9 +129,17 @@ against these.
 
 ## Known gaps / next steps
 
+- **selection precision degrades past ~64k of context** (the documented boundary is
+  real): on a synthetic 100k needle, dense answers correctly but LoD misses at
+  `top_pages` 32 and 64 and recovers at 128 - with identical behavior from the
+  composed (graph) and fused (in-op) selection, so this is the selection budget, not
+  a kernel bug. Until the region tier lands, use `--lod-top-pages 128` (or more) for
+  100k+ prompts; note the decode leaf walk grows with the budget (~46 t/s at top32 vs
+  ~31 t/s at top128 at depth 100k)
+- region tier (restores selection precision at low budgets for >64k contexts) not
+  implemented - the highest-priority next step
 - fused kernel is F16-only (quantized decode uses the composed fallback); q8_0 in-kernel
   dequant is designed but not implemented
-- region tier (for >64k contexts at default settings) not implemented
 - parallel sequences and multi-GPU input broadcast optimization not implemented
 - selection is shared per layer (or per KV head with `--lod-sel head`, at x n_head_kv
   gather cost); per-query selection as in the LoD1 spec is future work

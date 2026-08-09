@@ -738,6 +738,18 @@ int main(void) {
                 if (r < 0) unsupported++;
             }
         }
+        {
+            // large page count: exercises the top-k fallback past the bitonic capacity
+            const int r = run_fused_case({ 64, 2, 2, 16, 2500, 5, 1, 0, false, GGML_TYPE_F16 }, backend, 32);
+            if (r > 0) fails++;
+            if (r < 0) unsupported++;
+        }
+        {
+            // 256k-context scale page count (fallback top-k + full summaries walk)
+            const int r = run_fused_case({ 64, 2, 2, 16, 4000, 5, 1, 0, false, GGML_TYPE_F16 }, backend, 32);
+            if (r > 0) fails++;
+            if (r < 0) unsupported++;
+        }
         if (unsupported > 0) {
             printf("  (%d cases skipped for missing op support)\n", unsupported);
         }

@@ -149,10 +149,22 @@ int llama_server(common_params & params, int argc, char ** argv) {
         }
 
         if (params.n_parallel < 0) {
-            SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n");
+            if (getenv("LLAMA_LOD") != nullptr) {
+                // the LoD read needs per-sequence KV streams; a unified cache would
+                // silently fall back to the dense read on every ubatch
+                SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 (LoD keeps kv_unified = false)\n");
 
-            params.n_parallel = 4;
-            params.kv_unified = true;
+                params.n_parallel = 4;
+            } else {
+                SRV_TRC("%s", "n_parallel is set to auto, using n_parallel = 4 and kv_unified = true\n");
+
+                params.n_parallel = 4;
+                params.kv_unified = true;
+            }
+        }
+
+        if (getenv("LLAMA_LOD") != nullptr && params.kv_unified) {
+            SRV_WRN("%s", "LoD attention with a unified KV cache falls back to the dense read; drop --kv-unified to use LoD\n");
         }
     }
 

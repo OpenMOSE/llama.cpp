@@ -2111,6 +2111,7 @@ struct llama_model_qwen35moe : public llama_model_base {
     private:
         ggml_tensor * build_layer_attn(
         llm_graph_input_attn_kv * inp_attn,
+       llm_graph_input_attn_lod * inp_lod,
                     ggml_tensor * cur,
                     ggml_tensor * inp_pos,
                             int * sections,

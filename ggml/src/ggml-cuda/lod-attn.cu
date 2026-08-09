@@ -4,21 +4,21 @@
 
 #include "lod-attn.cuh"
 
+#include <type_traits>
+
 #define LOD_ATTN_SPLITS   32
-#if defined(GGML_USE_HIP)
-#define LOD_ATTN_TILE     64
 #define LOD_ATTN_NTILES    4
-#else
-#define LOD_ATTN_TILE     32
-#define LOD_ATTN_NTILES    4
-#endif
 #define LOD_ATTN_MAX_D   512
 #define LOD_ATTN_MAX_P  8192
-#define LOD_ATTN_EPL2   (LOD_ATTN_MAX_D/(2*LOD_ATTN_TILE)) // max element pairs per lane
 #define HPT                2  // query heads per tile (paired within one GQA group)
 
-// one 32-lane tile processes one virtual column at a time; every lane owns two
+// the tile is one hardware wave: 64 on CDNA (wave64), 32 on RDNA and NVIDIA - shuffles
+// wider than the wave return garbage, so the tile size is picked at run time from the
+// device's warp size and both instantiations are compiled
+
+// one wave-wide tile processes one virtual column at a time; every lane owns two
 // consecutive elements (D is even), enabling half2/float2 loads
+template <int tile_sz>
 static __global__ void lod_attn_split_f(
         const char * __restrict__ q,  const char * __restrict__ k,  const char * __restrict__ v,
         const char * __restrict__ ks, const char * __restrict__ vs,
@@ -40,8 +40,8 @@ static __global__ void lod_attn_split_f(
     const int h0  = (row%nhp)*HPT;
     const int hk  = h0/(Hq/Hkv);
 
-    const int lane = threadIdx.x%LOD_ATTN_TILE;
-    const int tile = threadIdx.x/LOD_ATTN_TILE;
+    const int lane = threadIdx.x%tile_sz;
+    const int tile = threadIdx.x/tile_sz;
 
     const int prev_end = st[0];
     const int Pr       = st[1];                  // complete pages to read
@@ -50,8 +50,8 @@ static __global__ void lod_attn_split_f(
     const int n_tail   = limit - tail0 + 1;
     const int n_cols   = Pr + n_sel*ps + n_tail; // virtual column space
 
-    const int epl2_k = (Dk/2 + LOD_ATTN_TILE - 1)/LOD_ATTN_TILE; // element pairs per lane
-    const int epl2_v = (Dv/2 + LOD_ATTN_TILE - 1)/LOD_ATTN_TILE;
+    const int epl2_k = (Dk/2 + tile_sz - 1)/tile_sz; // element pairs per lane
+    const int epl2_v = (Dv/2 + tile_sz - 1)/tile_sz;
 
     __shared__ float    sm_q[HPT][LOD_ATTN_MAX_D];
     __shared__ uint32_t sm_sel[LOD_ATTN_MAX_P/32];
@@ -74,7 +74,7 @@ static __global__ void lod_attn_split_f(
 
     float m  [HPT];
     float den[HPT];
-    float acc[HPT][LOD_ATTN_MAX_D/LOD_ATTN_TILE] = {{ 0.0f }}; // 2 consecutive elements per slot pair
+    float acc[HPT][LOD_ATTN_MAX_D/tile_sz] = {{ 0.0f }}; // 2 consecutive elements per slot pair
     for (int j = 0; j < HPT; ++j) {
         m[j]   = -INFINITY;
         den[j] = 0.0f;
@@ -123,7 +123,7 @@ static __global__ void lod_attn_split_f(
         if (kf16) {
             const half2 * kh = (const half2 *) kp;
             for (int e = 0; e < epl2_k; ++e) {
-                const int i2 = lane + e*LOD_ATTN_TILE;
+                const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dk) {
                     const float2 kv2 = __half22float2(kh[i2]);
                     for (int j = 0; j < HPT; ++j) {
@@ -134,7 +134,7 @@ static __global__ void lod_attn_split_f(
         } else {
             const float2 * kf = (const float2 *) kp;
             for (int e = 0; e < epl2_k; ++e) {
-                const int i2 = lane + e*LOD_ATTN_TILE;
+                const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dk) {
                     const float2 kv2 = kf[i2];
                     for (int j = 0; j < HPT; ++j) {
@@ -144,9 +144,9 @@ static __global__ void lod_attn_split_f(
             }
         }
 #pragma unroll
-        for (int off = LOD_ATTN_TILE/2; off > 0; off >>= 1) {
+        for (int off = tile_sz/2; off > 0; off >>= 1) {
             for (int j = 0; j < HPT; ++j) {
-                sj[j] += __shfl_xor_sync(0xffffffff, sj[j], off, LOD_ATTN_TILE);
+                sj[j] += __shfl_xor_sync(0xffffffff, sj[j], off, tile_sz);
             }
         }
 
@@ -170,7 +170,7 @@ static __global__ void lod_attn_split_f(
         if (vf16) {
             const half2 * vh = (const half2 *) vp;
             for (int e = 0; e < epl2_v; ++e) {
-                const int i2 = lane + e*LOD_ATTN_TILE;
+                const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dv) {
                     const float2 vv2 = __half22float2(vh[i2]);
                     for (int j = 0; j < HPT; ++j) {
@@ -182,7 +182,7 @@ static __global__ void lod_attn_split_f(
         } else {
             const float2 * vf = (const float2 *) vp;
             for (int e = 0; e < epl2_v; ++e) {
-                const int i2 = lane + e*LOD_ATTN_TILE;
+                const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dv) {
                     const float2 vv2 = vf[i2];
                     for (int j = 0; j < HPT; ++j) {
@@ -217,7 +217,7 @@ static __global__ void lod_attn_split_f(
             sm_den[tile] = den[j]*e_t;
         }
         for (int e = 0; e < epl2_v; ++e) {
-            const int i2 = lane + e*LOD_ATTN_TILE;
+            const int i2 = lane + e*tile_sz;
             if (2*i2 < Dv) {
                 sm_acc[tile][2*i2 + 0] = acc[j][2*e + 0]*e_t;
                 sm_acc[tile][2*i2 + 1] = acc[j][2*e + 1]*e_t;
@@ -284,6 +284,7 @@ static __global__ void lod_attn_fold_sums_f(
 // dot(q, k_sums); the ranking is scale-invariant so the raw sums are used); the last
 // Hkv blocks run the fold of lod_attn_fold_sums_f (fold writes pages >= Pr, scoring
 // reads pages < Pr - disjoint)
+template <int tile_sz>
 static __global__ void lod_attn_score_fold_f(
         const char * __restrict__ q, const char * __restrict__ ks,
         const char * __restrict__ k, const char * __restrict__ v,
@@ -339,9 +340,9 @@ static __global__ void lod_attn_score_fold_f(
 
     const float * ksp = (const float *)(ks + (uint64_t) p*ks_nb1 + (uint64_t) kv*ks_nb2);
 
-    float ksd[2*LOD_ATTN_EPL2];
-    for (int e = 0; e < Dk/LOD_ATTN_TILE; ++e) {
-        ksd[e] = ksp[lane + e*LOD_ATTN_TILE];
+    float ksd[LOD_ATTN_MAX_D/tile_sz];
+    for (int e = 0; e < Dk/tile_sz; ++e) {
+        ksd[e] = ksp[lane + e*tile_sz];
     }
 
     float best = -INFINITY;
@@ -350,12 +351,12 @@ static __global__ void lod_attn_score_fold_f(
             const float * qp = (const float *)(q + (uint64_t) qi*q_nb1 + (uint64_t)(kv*g + j)*q_nb2);
 
             float s = 0.0f;
-            for (int e = 0; e < Dk/LOD_ATTN_TILE; ++e) {
-                s += qp[lane + e*LOD_ATTN_TILE]*ksd[e];
+            for (int e = 0; e < Dk/tile_sz; ++e) {
+                s += qp[lane + e*tile_sz]*ksd[e];
             }
 #pragma unroll
-            for (int off = LOD_ATTN_TILE/2; off > 0; off >>= 1) {
-                s += __shfl_xor_sync(0xffffffff, s, off, LOD_ATTN_TILE);
+            for (int off = tile_sz/2; off > 0; off >>= 1) {
+                s += __shfl_xor_sync(0xffffffff, s, off, tile_sz);
             }
             best = fmaxf(best, s);
         }
@@ -529,7 +530,7 @@ bool ggml_cuda_lod_attn_supported(const ggml_tensor * dst) {
            q->ne[0]%2 == 0 && v->ne[0]%2 == 0 &&
            (q->ne[2]/k->ne[2])%HPT == 0 &&
            q->ne[2]/k->ne[2] <= 32 && // in-op selection: bounded GQA group
-           q->ne[0]%LOD_ATTN_TILE == 0 && // in-op selection: lanes split the head dim evenly
+           q->ne[0]%64 == 0 && // in-op selection: lanes split the head dim evenly (either tile size)
 
            ks->ne[1] <= LOD_ATTN_MAX_P &&
            (k->type == GGML_TYPE_F16 || k->type == GGML_TYPE_F32) &&
@@ -562,6 +563,9 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     cudaStream_t stream = ctx.stream();
 
+    // one tile = one hardware wave (64 on CDNA, 32 on RDNA/NVIDIA)
+    const int warp_size = ggml_cuda_info().devices[ctx.device].warp_size;
+
     ggml_cuda_pool_alloc<float> part(ctx.pool(), (size_t) n_rows*LOD_ATTN_SPLITS*(2 + Dv));
 
     const int k_f16 = k->type == GGML_TYPE_F16;
@@ -591,16 +595,24 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         ws_scores.alloc((size_t) P*Hkv);
         ws_sel.alloc(n_sel);
 
-        lod_attn_score_fold_f<<<P*Hkv + Hkv, LOD_ATTN_TILE, 0, stream>>>(
-                (const char *) q->data, (const char *) ks->data,
-                (const char *) k->data, (const char *) v->data,
-                (float *) ks->data, (float *) vs->data, (const int *) st->data,
-                ws_scores.get(),
-                Dk, Dv, nq, Hq, Hkv, P, ps,
-                q->nb[1], q->nb[2],
-                ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
-                k->nb[1], k->nb[2], v->nb[1], v->nb[2],
-                k_f16, v_f16);
+        const auto launch_score = [&](auto tile_tag) {
+            constexpr int TS = decltype(tile_tag)::value;
+            lod_attn_score_fold_f<TS><<<P*Hkv + Hkv, TS, 0, stream>>>(
+                    (const char *) q->data, (const char *) ks->data,
+                    (const char *) k->data, (const char *) v->data,
+                    (float *) ks->data, (float *) vs->data, (const int *) st->data,
+                    ws_scores.get(),
+                    Dk, Dv, nq, Hq, Hkv, P, ps,
+                    q->nb[1], q->nb[2],
+                    ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
+                    k->nb[1], k->nb[2], v->nb[1], v->nb[2],
+                    k_f16, v_f16);
+        };
+        if (warp_size == 64) {
+            launch_score(std::integral_constant<int, 64>{});
+        } else {
+            launch_score(std::integral_constant<int, 32>{});
+        }
 
         if (P <= LOD_TOPK_SORT_MAX) {
             lod_attn_topk_sort<<<1, 256, 0, stream>>>(ws_scores.get(), ws_sel.get(), (const int *) st->data, n_sel, P, Hkv);
@@ -611,18 +623,27 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
         sel_ptr = ws_sel.get();
     }
 
-    const dim3 grid(n_rows/HPT, LOD_ATTN_SPLITS, 1);
-    const dim3 block(LOD_ATTN_TILE*LOD_ATTN_NTILES, 1, 1);
+    const auto launch_split = [&](auto tile_tag) {
+        constexpr int TS = decltype(tile_tag)::value;
 
-    lod_attn_split_f<<<grid, block, 0, stream>>>(
-            (const char *) q->data, (const char *) k->data, (const char *) v->data,
-            (const char *) ks->data, (const char *) vs->data,
-            sel_ptr, (const int *) st->data,
-            part.get(),
-            Dk, Dv, Hq, Hkv, P, n_sel, ps,
-            q->nb[1],  q->nb[2],  k->nb[1],  k->nb[2],  v->nb[1], v->nb[2],
-            ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
-            scale, logf((float) ps), k_f16, v_f16);
+        const dim3 grid(n_rows/HPT, LOD_ATTN_SPLITS, 1);
+        const dim3 block(TS*LOD_ATTN_NTILES, 1, 1);
+
+        lod_attn_split_f<TS><<<grid, block, 0, stream>>>(
+                (const char *) q->data, (const char *) k->data, (const char *) v->data,
+                (const char *) ks->data, (const char *) vs->data,
+                sel_ptr, (const int *) st->data,
+                part.get(),
+                Dk, Dv, Hq, Hkv, P, n_sel, ps,
+                q->nb[1],  q->nb[2],  k->nb[1],  k->nb[2],  v->nb[1], v->nb[2],
+                ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
+                scale, logf((float) ps), k_f16, v_f16);
+    };
+    if (warp_size == 64) {
+        launch_split(std::integral_constant<int, 64>{});
+    } else {
+        launch_split(std::integral_constant<int, 32>{});
+    }
 
     const dim3 grid_m(n_rows, (Dv + LOD_ATTN_MERGE_SLICE - 1)/LOD_ATTN_MERGE_SLICE, 1);
 

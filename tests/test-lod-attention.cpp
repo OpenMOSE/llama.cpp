@@ -499,8 +499,221 @@ static int run_case(const lod_case & c, ggml_backend_t backend) {
     return ok ? 0 : 1;
 }
 
+// direct GGML_OP_LOD_ATTN check: the in-op selection (sel == NULL) must produce the
+// same output as the explicit-sel path fed the same page set, computed on the host
+// with the op's rule (max over queries/heads of dot(q, k_sums), ties -> lower id)
+static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_top) {
+    const int64_t D = c.D, Hkv = c.Hkv, Hq = c.g*c.Hkv, nq = c.nq;
+    const int64_t P = c.P, ps = c.ps;
+    const int64_t prev_end = P*ps + c.n_tail;
+    const int64_t P_cap = P + 2;   // capacity headroom: the fold target page + one spare
+    const int64_t T_cap = P_cap*ps;
+    const float scale = 1.0f/sqrtf((float) D);
+
+    g_rng = 0x9E3779B97F4A7C15ULL ^ (uint64_t) (D*1000003 + P*10007 + n_top*101 + nq*7 + c.tkv);
+    const std::vector<float> qh = rand_vec(D*nq*Hq);
+    const std::vector<float> kh = rand_vec(D*T_cap*Hkv);
+    const std::vector<float> vh = rand_vec(D*T_cap*Hkv);
+
+    std::vector<float> ksh(D*P_cap*Hkv, 0.0f), vsh(D*P_cap*Hkv, 0.0f);
+    for (int64_t kv = 0; kv < Hkv; kv++) {
+        for (int64_t p = 0; p < P; p++) {
+            for (int64_t j = 0; j < ps; j++) {
+                for (int64_t d = 0; d < D; d++) {
+                    ksh[d + D*(p + P_cap*kv)] += kh[d + D*(p*ps + j + T_cap*kv)];
+                    vsh[d + D*(p + P_cap*kv)] += vh[d + D*(p*ps + j + T_cap*kv)];
+                }
+            }
+        }
+    }
+
+    // host selection with the op's rule; float accumulation in the same order
+    std::vector<std::pair<float, int64_t>> sc(P);
+    for (int64_t p = 0; p < P; p++) {
+        float best = -INFINITY;
+        for (int64_t h = 0; h < Hq; h++) {
+            for (int64_t qi = 0; qi < nq; qi++) {
+                float s = 0.0f;
+                for (int64_t d = 0; d < D; d++) {
+                    s += qh[d + D*(qi + nq*h)]*ksh[d + D*(p + P_cap*(h/c.g))];
+                }
+                best = std::max(best, s);
+            }
+        }
+        sc[p] = {best, p};
+    }
+    std::sort(sc.begin(), sc.end(), [](const std::pair<float, int64_t> & a, const std::pair<float, int64_t> & b) {
+        return a.first > b.first || (a.first == b.first && a.second < b.second);
+    });
+    std::vector<int32_t> selh(n_top, -1);
+    for (int64_t i = 0; i < std::min(n_top, P); i++) {
+        selh[i] = (int32_t) sc[i].second;
+    }
+
+    ggml_init_params ip = { ggml_tensor_overhead()*64 + ggml_graph_overhead()*2, NULL, true };
+    ggml_context * ctx = ggml_init(ip);
+
+    ggml_tensor * q    = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, nq, Hq);
+    ggml_tensor * k    = ggml_new_tensor_3d(ctx, c.tkv,         D, T_cap, Hkv);
+    ggml_tensor * v    = ggml_new_tensor_3d(ctx, c.tkv,         D, T_cap, Hkv);
+    ggml_tensor * ks   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
+    ggml_tensor * vs   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
+    ggml_tensor * st   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
+    ggml_tensor * selx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_top);
+
+    ggml_tensor * out_a = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, scale, (int) n_top);
+    ggml_tensor * out_b = ggml_lod_attn(ctx, q, k, v, ks, vs, selx, st, (int) ps, scale, 0);
+
+    ggml_cgraph * gfa = ggml_new_graph(ctx);
+    ggml_cgraph * gfb = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gfa, out_a);
+    ggml_build_forward_expand(gfb, out_b);
+
+    if (!ggml_backend_supports_op(backend, out_a)) {
+        ggml_free(ctx);
+        return -1;
+    }
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    auto upload_kv = [&](ggml_tensor * t, const std::vector<float> & h) {
+        if (c.tkv == GGML_TYPE_F16) {
+            std::vector<ggml_fp16_t> tmp(h.size());
+            ggml_fp32_to_fp16_row(h.data(), tmp.data(), h.size());
+            ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size()*sizeof(ggml_fp16_t));
+        } else {
+            ggml_backend_tensor_set(t, h.data(), 0, h.size()*sizeof(float));
+        }
+    };
+
+    const int32_t sth[2] = { (int32_t) prev_end, (int32_t) P };
+
+    ggml_backend_tensor_set(q, qh.data(), 0, qh.size()*sizeof(float));
+    upload_kv(k, kh);
+    upload_kv(v, vh);
+    ggml_backend_tensor_set(st, sth, 0, sizeof(sth));
+    ggml_backend_tensor_set(selx, selh.data(), 0, selh.size()*sizeof(int32_t));
+
+    std::vector<float> ya(D*Hq*nq), yb(D*Hq*nq);
+
+    bool ok = true;
+    for (int pass = 0; pass < 2; pass++) {
+        // the op folds the current tokens into the sums in place - re-upload per pass
+        ggml_backend_tensor_set(ks, ksh.data(), 0, ksh.size()*sizeof(float));
+        ggml_backend_tensor_set(vs, vsh.data(), 0, vsh.size()*sizeof(float));
+        if (ggml_backend_graph_compute(backend, pass == 0 ? gfa : gfb) != GGML_STATUS_SUCCESS) {
+            printf("  fused: graph compute failed\n");
+            ok = false;
+            break;
+        }
+        ggml_backend_tensor_get(pass == 0 ? out_a : out_b, (pass == 0 ? ya : yb).data(), 0, ya.size()*sizeof(float));
+    }
+
+    float md = 0.0f;
+    if (ok) {
+        for (size_t i = 0; i < ya.size(); i++) {
+            md = std::max(md, fabsf(ya[i] - yb[i]));
+        }
+        ok = md == 0.0f;
+    }
+
+    printf("  lod fused-sel D=%3d Hkv=%d g=%d ps=%2d P=%2d tail=%2d nq=%2d n_top=%2d %s: %s (max_diff=%g)\n",
+            (int) D, (int) Hkv, (int) c.g, (int) ps, (int) P, (int) c.n_tail, (int) nq, (int) n_top,
+            c.tkv == GGML_TYPE_F16 ? "f16" : "f32", ok ? "OK" : "FAIL", (double) md);
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+    return ok ? 0 : 1;
+}
+
+// LOD_BENCH=1: steady-state fused-op micro-benchmark at decode geometry (keeps the
+// GPU clocked up, so per-kernel times from rocprof on this binary are trustworthy)
+static void run_bench(ggml_backend_t backend) {
+    const int64_t D = 512, Hkv = 4, g = 8, Hq = g*Hkv, nq = 1;
+    const int64_t ps = 64, P = 256;
+    const int64_t n_top = getenv("LOD_BENCH_TOP") ? atoll(getenv("LOD_BENCH_TOP")) : 32;
+    const int64_t P_cap = P + 8, T_cap = P_cap*ps;
+    const int64_t prev_end = P*ps + 32;
+    const int   iters = 2000;
+
+    g_rng = 42;
+    const std::vector<float> qh = rand_vec(D*nq*Hq);
+    const std::vector<float> kh = rand_vec(D*T_cap*Hkv);
+    const std::vector<float> vh = rand_vec(D*T_cap*Hkv);
+    const std::vector<float> ksh = rand_vec(D*P_cap*Hkv);
+    const std::vector<float> vsh = rand_vec(D*P_cap*Hkv);
+
+    ggml_init_params ip = { ggml_tensor_overhead()*64 + ggml_graph_overhead(), NULL, true };
+    ggml_context * ctx = ggml_init(ip);
+
+    ggml_tensor * q  = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, nq, Hq);
+    ggml_tensor * k  = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, D, T_cap, Hkv);
+    ggml_tensor * v  = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, D, T_cap, Hkv);
+    ggml_tensor * ks = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
+    ggml_tensor * vs = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
+    ggml_tensor * st = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
+
+    ggml_tensor * out = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, 1.0f/sqrtf((float) D), (int) n_top);
+
+    ggml_cgraph * gf = ggml_new_graph(ctx);
+    ggml_build_forward_expand(gf, out);
+
+    if (!ggml_backend_supports_op(backend, out)) {
+        printf("bench: op unsupported\n");
+        ggml_free(ctx);
+        return;
+    }
+
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    auto up16 = [&](ggml_tensor * t, const std::vector<float> & h) {
+        std::vector<ggml_fp16_t> tmp(h.size());
+        ggml_fp32_to_fp16_row(h.data(), tmp.data(), h.size());
+        ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size()*sizeof(ggml_fp16_t));
+    };
+    const int32_t sth[2] = { (int32_t) prev_end, (int32_t) P };
+    ggml_backend_tensor_set(q, qh.data(), 0, qh.size()*sizeof(float));
+    up16(k, kh);
+    up16(v, vh);
+    ggml_backend_tensor_set(ks, ksh.data(), 0, ksh.size()*sizeof(float));
+    ggml_backend_tensor_set(vs, vsh.data(), 0, vsh.size()*sizeof(float));
+    ggml_backend_tensor_set(st, sth, 0, sizeof(sth));
+
+    for (int i = 0; i < 50; i++) {
+        ggml_backend_graph_compute(backend, gf); // warm up clocks
+    }
+    ggml_backend_synchronize(backend);
+    const int64_t t0 = ggml_time_us();
+    for (int i = 0; i < iters; i++) {
+        ggml_backend_graph_compute(backend, gf);
+    }
+    ggml_backend_synchronize(backend);
+    const int64_t t1 = ggml_time_us();
+
+    printf("bench %s: %.1f us/op (D=%d Hq=%d Hkv=%d P=%d top=%d)\n",
+            ggml_backend_name(backend), (double) (t1 - t0)/iters,
+            (int) D, (int) Hq, (int) Hkv, (int) P, (int) n_top);
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+}
+
 int main(void) {
     int fails = 0;
+    if (getenv("LOD_BENCH")) {
+        for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
+            ggml_backend_dev_t dev = ggml_backend_dev_get(i);
+            if (ggml_backend_dev_type(dev) == GGML_BACKEND_DEVICE_TYPE_CPU) {
+                continue;
+            }
+            ggml_backend_t backend = ggml_backend_dev_init(dev, NULL);
+            if (backend) {
+                run_bench(backend);
+                ggml_backend_free(backend);
+            }
+        }
+        return 0;
+    }
     for (size_t i = 0; i < ggml_backend_dev_count(); i++) {
         ggml_backend_dev_t dev = ggml_backend_dev_get(i);
         ggml_backend_t backend = ggml_backend_dev_init(dev, NULL);
@@ -515,6 +728,15 @@ int main(void) {
             const int r = run_case(c, backend);
             if (r > 0) fails++;
             if (r < 0) unsupported++;
+        }
+        for (const lod_case & fc : { lod_case {  64, 2, 2, 16, 8, 5, 1, 0, false, GGML_TYPE_F32 },
+                                     lod_case {  64, 2, 2, 16, 8, 5, 3, 0, false, GGML_TYPE_F16 },
+                                     lod_case { 128, 4, 8, 16, 8, 5, 1, 0, false, GGML_TYPE_F16 } }) {
+            for (int64_t n_top : { (int64_t) 3, (int64_t) 8, (int64_t) 10 }) {
+                const int r = run_fused_case(fc, backend, n_top);
+                if (r > 0) fails++;
+                if (r < 0) unsupported++;
+            }
         }
         if (unsupported > 0) {
             printf("  (%d cases skipped for missing op support)\n", unsupported);

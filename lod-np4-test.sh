@@ -11,8 +11,9 @@ echo "health=$ok"
 if [ "$ok" = 1 ]; then
     for i in 1 2 3 4; do
         curl -s --max-time 150 http://127.0.0.1:18089/completion -d "{\"prompt\":\"Q$i: what is $i plus $i? Answer with the number only. A:\",\"n_predict\":10,\"temperature\":0}" > /tmp/r$i.json &
+        CURLS="$CURLS $!"
     done
-    wait
+    wait $CURLS
     for i in 1 2 3 4; do echo "R$i: $(head -c 120 /tmp/r$i.json)"; done
     echo "--- server log tail ---"
     tail -15 /tmp/lodsrv.log

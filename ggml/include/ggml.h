@@ -2614,6 +2614,8 @@ extern "C" {
     //   state  [1]                          I32 n_past; query i attends positions <= n_past + i
     //   res    [D_v, n_head_q, n_tokens]   F32
     // k/v may be padded past n_past + n_tokens, the padded columns are never read
+    // sel == NULL selects in-op: the n_top complete pages with the highest
+    // query/head-max-pooled k_sums score (ties -> lower page id)
     GGML_API struct ggml_tensor * ggml_lod_attn(
         struct ggml_context * ctx,
         struct ggml_tensor  * q,
@@ -2624,7 +2626,8 @@ extern "C" {
         struct ggml_tensor  * sel,
         struct ggml_tensor  * state,
         int                   page_size,
-        float                 scale);
+        float                 scale,
+        int                   n_top);
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)

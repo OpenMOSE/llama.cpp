@@ -6358,12 +6358,13 @@ struct ggml_tensor * ggml_lod_attn(
         struct ggml_tensor  * sel,
         struct ggml_tensor  * state,
         int                   page_size,
-        float                 scale) {
+        float                 scale,
+        int                   n_top) {
     GGML_ASSERT(state->type  == GGML_TYPE_I32);
     GGML_ASSERT(q->type      == GGML_TYPE_F32);
     GGML_ASSERT(k_sums->type == GGML_TYPE_F32);
     GGML_ASSERT(v_sums->type == GGML_TYPE_F32);
-    GGML_ASSERT(sel->type    == GGML_TYPE_I32);
+    GGML_ASSERT(sel == NULL ? n_top > 0 : sel->type == GGML_TYPE_I32);
 
     GGML_ASSERT(q->ne[0] == k->ne[0]);
     GGML_ASSERT(k->ne[1] == v->ne[1]);
@@ -6382,6 +6383,7 @@ struct ggml_tensor * ggml_lod_attn(
 
     ggml_set_op_params_i32(result, 0, page_size);
     ggml_set_op_params_f32(result, 1, scale);
+    ggml_set_op_params_i32(result, 2, n_top);
 
     result->op   = GGML_OP_LOD_ATTN;
     result->src[0] = q;

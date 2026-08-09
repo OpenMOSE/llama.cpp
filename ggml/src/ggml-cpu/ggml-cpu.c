@@ -2948,6 +2948,13 @@ struct ggml_cplan ggml_graph_plan(
                     {
                         cur += sizeof(int32_t)*node->src[0]->ne[0]*n_tasks;
                     } break;
+                case GGML_OP_LOD_ATTN:
+                    {
+                        if (node->src[5] == NULL) {
+                            // in-op selection scratch, shared by every thread
+                            cur += sizeof(int32_t)*ggml_get_op_params_i32(node, 2);
+                        }
+                    } break;
                 case GGML_OP_FLASH_ATTN_EXT:
                     {
                         const int64_t neq2 = node->src[0]->ne[2]; // number of query heads

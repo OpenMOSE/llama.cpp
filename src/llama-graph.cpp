@@ -3541,7 +3541,9 @@ ggml_tensor * llm_graph_context::build_attn(
     ggml_tensor * lk     = nullptr; // [D_k, NL, n_head_kv]
     ggml_tensor * lv     = nullptr;
 
-    if (kP > 0) {
+    // the fused op selects in-op (and over the runtime page count, so selection never
+    // lags the static graph) - no selection subgraph at all
+    if (kP > 0 && !use_fused) {
         // page scores at query-head resolution; 1/ps turns the stored sums into means
         ggml_tensor * kp = mctx_cur->get_k_page_sums(ctx0, il, 0, P_full);
 
@@ -3698,7 +3700,7 @@ ggml_tensor * llm_graph_context::build_attn(
         cur = ggml_lod_attn(ctx0, q, kf, vf,
                 mctx_cur->get_k_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
                 mctx_cur->get_v_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
-                sel, inp->lod_meta, ps, kq_scale);
+                nullptr, inp->lod_meta, ps, kq_scale, cparams.lod_top_pages);
         cb(cur, "lod_fused", il);
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);

@@ -39,9 +39,10 @@ decoding (`--spec-type draft-mtp`).
 
 ### Restrictions
 
-- one active sequence at a time; run `llama-server` with a single slot (`-np 1`).
-  `n_seq_max > 1` only warns, but concurrent slots would break the cache-contiguity
-  assumption (asserted at run time)
+- parallel slots are supported (`llama-server -np 4` etc.): each stream keeps its own
+  page sums. A ubatch that mixes tokens of several streams falls back to a dense read
+  for that ubatch (correct - the cache always holds the dense contents; the sums catch
+  up lazily afterwards)
 - no context shift (the cache reports `can_shift = false`); suffix removal (prompt reuse,
   speculative rollback) is supported, mid-range removal forces a reprocess
 - `--lod-page-size` must stay in sync between runs of the same process only (no persistence)
@@ -57,13 +58,17 @@ size of the LoD1 spec - larger ubatches see more recent context exactly (`-ub 20
 recommended; at that setting LoD prefill quality matches dense).
 
 Decode (fused, default): one custom op `GGML_OP_LOD_ATTN` (CPU reference + HIP kernel,
-`ggml/src/ggml-cuda/lod-attn.cu`) performs the whole read: a split-K grid walks
-[unselected summaries | selected leaves | tail] with one online softmax, a small kernel
-folds the current token into the page sums, and a merge kernel combines the split
-partials. Geometry (`n_past`, complete pages) travels through a tiny I32 input, so the
-decode graph shape is fully static and reused every token. Quantized caches currently
-fall back to the composed-op path for decode (correct, ~13% slower - same order as the
-dense q8_0 penalty).
+`ggml/src/ggml-cuda/lod-attn.cu`) performs the whole read, including the page selection
+(`sel == NULL` + `n_top`): a score kernel pools `dot(q, k_sums)` over queries and heads
+(and folds the current token into the sums in the same launch), a shared-memory bitonic
+sort picks the top pages, a split-K grid walks
+[unselected summaries | selected leaves | tail] with one online softmax, and a merge
+kernel combines the split partials - 4 kernels, no selection subgraph in the ggml graph
+at all. Geometry (`n_past`, complete pages) travels through a tiny I32 input, so the
+decode graph shape is fully static, reused every token, and replayed as one HIP graph;
+selection ranks the *runtime* page count, so it never lags the static graph. Quantized
+caches currently fall back to the composed-op path for decode (correct, ~13% slower -
+same order as the dense q8_0 penalty).
 
 ## Measured results (MI325X, single GPU, `-ub 2048`, top_pages 32)
 
@@ -71,8 +76,11 @@ gemma-4-31B q4_0 (10/60 full-attention layers, D=512):
 
 | metric | dense (fa on) | LoD |
 | --- | --- | --- |
-| pp16384 @ depth 48k | 1053 t/s | **2522 t/s** (depth-flat) |
-| tg512 @ depth 16k | 78.6 | 71.2 (90%) |
+| pp16384 @ depth 16k | 1706 t/s | **2309 t/s** (+35%) |
+| pp16384 @ depth 48k | 1045 t/s | **2292 t/s** (+119%, depth-flat) |
+| tg512 @ depth 0 | 51.3 | 51.3 (100%) |
+| tg512 @ depth 16k | 50.2 | 47.7 (95%) |
+| tg512 @ depth 48k | 47.5 | 44.1 (93%) |
 | perplexity (c=4096) | 91.92 | 91.50 |
 | needle 6k ctx, top8 (8% far-context read) | ok | ok (7391) |
 
@@ -80,9 +88,12 @@ Qwen3.6-27B Q4_K_M (16/64 full-attention layers, D=256):
 
 | metric | dense (fa on) | LoD |
 | --- | --- | --- |
-| pp16384 @ depth 48k | 2039 t/s | **2644 t/s** |
-| tg512 @ depth 48k | 72.1 | 69.1 (96%) |
+| pp16384 @ depth 48k | 2011 t/s | **2490 t/s** (+24%, depth-flat) |
+| tg512 @ depth 48k | 44.2 | 43.9 (99%) |
 | perplexity (c=4096) | 4.298 | 4.269 |
+
+(absolute t/s vary a few percent run to run with the node's power state; the ratios
+are from adjacent same-condition runs)
 
 With `-ctk q8_0 -ctv q8_0` (gemma): prefill identical to the F16 LoD numbers, PPL parity,
 full-attention KV footprint ~0.53x (q4_0: ~0.28x).

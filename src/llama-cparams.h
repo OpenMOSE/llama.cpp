@@ -48,6 +48,14 @@ struct llama_cparams {
     bool fused_dsv4_hc_post;
     bool auto_fhc;
     bool no_perf;
+
+    // LoD sparse attention for full-attention layers (env: LLAMA_LOD*)
+    bool     lod;
+    bool     lod_sel_head;   // top-k page set per KV head (else one set per layer)
+    bool     lod_fused;      // use the fused GGML_OP_LOD_ATTN read for decode
+    uint32_t lod_page_size;
+    uint32_t lod_top_pages;
+
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;
     bool kv_unified;

@@ -574,6 +574,7 @@ extern "C" {
         GGML_OP_DSV4_HC_COMB,
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
+        GGML_OP_LOD_ATTN,
 
         GGML_OP_UNARY,
 
@@ -2600,6 +2601,30 @@ extern "C" {
         struct ggml_tensor  * k,
         struct ggml_tensor  * weights,
         struct ggml_tensor  * mask);
+
+    // LoD sparse attention read: one softmax over [selected-page leaves | raw tail | page summaries]
+    // assumes cache cell index == token position; query i attends positions < (new_end - n_tokens) + i + 1
+    //
+    //   q      [D_k, n_tokens, n_head_q]   F32
+    //   k      [D_k, new_end,  n_head_kv]  F16/F32 view of the cache
+    //   v      [D_v, new_end,  n_head_kv]  F16/F32 view of the cache
+    //   k_sums [D_k, n_pages,  n_head_kv]  F32 per-page sums over page_size tokens
+    //   v_sums [D_v, n_pages,  n_head_kv]  F32
+    //   sel    [n_sel]                     I32 page ids read at leaf detail (their summaries go silent)
+    //   state  [1]                          I32 n_past; query i attends positions <= n_past + i
+    //   res    [D_v, n_head_q, n_tokens]   F32
+    // k/v may be padded past n_past + n_tokens, the padded columns are never read
+    GGML_API struct ggml_tensor * ggml_lod_attn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * k_sums,
+        struct ggml_tensor  * v_sums,
+        struct ggml_tensor  * sel,
+        struct ggml_tensor  * state,
+        int                   page_size,
+        float                 scale);
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)

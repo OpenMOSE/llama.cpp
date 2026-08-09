@@ -1619,6 +1619,42 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--lod"},
+        "enable LoD sparse attention for full-attention layers (experimental, single sequence only)",
+        [](common_params & params) {
+            setenv("LLAMA_LOD", "1", 1);
+            setenv("LLAMA_LOD_FUSED", "1", 0); // fused decode kernel, do not override an explicit choice
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod-top-pages"}, "N",
+        "LoD: pages read at leaf detail per layer (default: 32)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD_TOP_PAGES", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod-page-size"}, "N",
+        "LoD: tokens per page (default: 64)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD_PAGE_SIZE", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod-sel"}, "MODE",
+        "LoD: top-k page selection granularity: layer (default) or head",
+        [](common_params & params, const std::string & value) {
+            if (value != "layer" && value != "head") {
+                throw std::invalid_argument("--lod-sel must be 'layer' or 'head'");
+            }
+            setenv("LLAMA_LOD_SEL", value.c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
         {"--swa-full"},
         string_format("use full-size SWA cache (default: %s)\n"
             "[(more info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)", params.swa_full ? "true" : "false"),

@@ -136,7 +136,7 @@ flake.lock
 /lora-tests
 
 # Local scripts
-
+/simple-run.sh
 /run-vim.sh
 /run-chat.sh
 /run-spec.sh

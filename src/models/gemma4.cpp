@@ -1,4 +1,5 @@
 #include "models.h"
+#include "llama-kv-cache-iswa.h"
 
 void llama_model_gemma4::load_arch_hparams(llama_model_loader & ml) {
     hparams.swa_type = LLAMA_SWA_TYPE_STANDARD;
@@ -161,6 +162,13 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
     // TODO: is causal == true correct? might need some changes
     auto * inp_attn = build_attn_inp_kv_iswa();
 
+    // LoD sparse read for the full-attention (non-SWA) layers
+    llm_graph_input_attn_lod * inp_lod = nullptr;
+    if (cparams.lod) {
+        const auto * mctx_iswa = static_cast<const llama_kv_cache_iswa_context *>(mctx);
+        inp_lod = build_attn_inp_lod(mctx_iswa->get_base(), llm_graph_input_attn_lod::LOD_PARENT_ISWA);
+    }
+
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     ggml_tensor * inp_per_layer = nullptr;
@@ -236,9 +244,15 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
 
             cb(Kcur, "Kcur_pos", il);
 
-            cur = build_attn(inp_attn, model.layers[il].wo,
-                    nullptr, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
-                    hparams.f_attention_scale, il);
+            if (inp_lod && !hparams.is_swa(il)) {
+                cur = build_attn(inp_lod, model.layers[il].wo,
+                        nullptr, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
+                        hparams.f_attention_scale, il);
+            } else {
+                cur = build_attn(inp_attn, model.layers[il].wo,
+                        nullptr, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
+                        hparams.f_attention_scale, il);
+            }
         } else {
             // reuse KV cache of earlier layers
             cur = build_attn(inp_attn,

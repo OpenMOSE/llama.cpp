@@ -388,6 +388,53 @@ public:
     const llama_kv_cache_context * mctx;
 };
 
+// LoD sparse attention: read the past through a page-sum index instead of dense attention
+// tiers: [leaves of top-k pages | raw tail + current tokens (exact, causal) | page summaries]
+// all tiers share one softmax, so the denominator is complete for any selection
+class llm_graph_input_attn_lod : public llm_graph_input_i {
+public:
+    llm_graph_input_attn_lod(
+            const llama_hparams & hparams,
+            const llama_cparams & cparams,
+            const llama_kv_cache_context * mctx) :
+        hparams(hparams),
+        cparams(cparams),
+        mctx(mctx) {
+    }
+    ~llm_graph_input_attn_lod() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    // the graph can be reused while the page window is unchanged (view offsets depend on
+    // tail_start and P_full, the exact tier is padded to a fixed size)
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * get_k_idxs() const { return self_k_idxs; }
+    ggml_tensor * get_v_idxs() const { return self_v_idxs; }
+
+    ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
+    ggml_tensor * self_v_idxs = nullptr; // I64 [n_batch]
+
+    // additive mask over the concatenated logits [NL + n_exact_pad + P_full, n_batch, 1]
+    // (only [n_exact_pad, n_batch, 1] when the index is not used yet)
+    ggml_tensor * lod_mask = nullptr;
+    ggml_tensor * lod_ones = nullptr; // F32 [page_size], for page-sum reduction
+    ggml_tensor * lod_meta = nullptr; // I32 [1] = n_past, read by the fused op at compute time
+    ggml_tensor * lod_arange = nullptr; // I32 [n_exact_pad] = tail_start+i, for quantized-cache dequant reads
+
+    // which memory type wraps the LoD base cache (needed to re-resolve mctx on graph reuse)
+    enum lod_parent_t { LOD_PARENT_PLAIN, LOD_PARENT_ISWA, LOD_PARENT_HYBRID };
+    lod_parent_t parent = LOD_PARENT_PLAIN;
+
+    // ubatch geometry, fixed at graph build (prev_end advances on reuse)
+    uint32_t ps = 0, prev_end = 0, tail_start = 0, n_exact_pad = 0, P_full = 0, kP = 0, NL = 0;
+
+    const llama_hparams hparams;
+    const llama_cparams cparams;
+
+    const llama_kv_cache_context * mctx;
+};
+
 class llm_graph_input_attn_k_dsa : public llm_graph_input_i {
 public:
     llm_graph_input_attn_k_dsa(
@@ -1185,6 +1232,23 @@ struct llm_graph_context {
             ggml_tensor * kq_b,
             ggml_tensor * sinks, // [n_head_q]
             ggml_tensor * v_mla, // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
+                  float   kq_scale,
+                    int   il) const;
+
+    // mctx_base: the (non-SWA) cache holding the LoD layers, e.g. iswa get_base() or the plain kv context
+    llm_graph_input_attn_lod * build_attn_inp_lod(const llama_kv_cache_context * mctx_base, llm_graph_input_attn_lod::lod_parent_t parent) const;
+
+    ggml_tensor * build_attn(
+            llm_graph_input_attn_lod * inp,
+            ggml_tensor * wo,
+            ggml_tensor * wo_b,
+            ggml_tensor * wo_s,
+            ggml_tensor * q_cur, // [n_embd_head_q, n_head_q, n_tokens]
+            ggml_tensor * k_cur, // [n_embd_head_k, n_head_k, n_tokens]
+            ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
+            ggml_tensor * kq_b,
+            ggml_tensor * sinks, // [n_head_q]
+            ggml_tensor * v_mla,
                   float   kq_scale,
                     int   il) const;
 

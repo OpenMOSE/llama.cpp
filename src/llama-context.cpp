@@ -247,6 +247,25 @@ llama_context::llama_context(
     cparams.flash_attn = params.flash_attn_type != LLAMA_FLASH_ATTN_TYPE_DISABLED;
     cparams.auto_fa    = params.flash_attn_type == LLAMA_FLASH_ATTN_TYPE_AUTO;
 
+    // env: LLAMA_LOD, LLAMA_LOD_PAGE_SIZE, LLAMA_LOD_TOP_PAGES, LLAMA_LOD_SEL (head|layer)
+    cparams.lod           = getenv("LLAMA_LOD") != nullptr;
+    cparams.lod_page_size = getenv("LLAMA_LOD_PAGE_SIZE") ? atoi(getenv("LLAMA_LOD_PAGE_SIZE")) : 64;
+    cparams.lod_top_pages = getenv("LLAMA_LOD_TOP_PAGES") ? atoi(getenv("LLAMA_LOD_TOP_PAGES")) : 32;
+    // default: one page set per layer - per-KV-head selection reads x n_head_kv more data
+    // for a second-order quality gain (opt in with LLAMA_LOD_SEL=head)
+    cparams.lod_sel_head  = getenv("LLAMA_LOD_SEL") && strcmp(getenv("LLAMA_LOD_SEL"), "head") == 0;
+    // opt-in until every backend has the kernel - unsupported backends would bounce the whole cache to the CPU
+    cparams.lod_fused     = getenv("LLAMA_LOD_FUSED") != nullptr;
+
+    if (cparams.lod) {
+        LLAMA_LOG_INFO("%s: LoD attention enabled: page_size = %u, top_pages = %u\n",
+                __func__, cparams.lod_page_size, cparams.lod_top_pages);
+
+        if (cparams.n_seq_max > 1) {
+            throw std::runtime_error("LoD attention requires n_seq_max == 1");
+        }
+    }
+
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
     cparams.auto_fgdn    = true;

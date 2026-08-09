@@ -1083,6 +1083,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_COMB",
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
+    "LOD_ATTN",
 
     "UNARY",
 
@@ -1100,7 +1101,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1198,6 +1199,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_comb(mixes, scale, base)",
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
+    "lod_attn(q, k, v, ks, vs, sel)",
 
     "unary(x)",
 
@@ -1215,7 +1217,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 101, "GGML_OP_COUNT != 101");
+static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6340,6 +6342,55 @@ struct ggml_tensor * ggml_lightning_indexer(
     result->src[1] = k;
     result->src[2] = weights;
     result->src[3] = mask;
+
+    return result;
+}
+
+// ggml_lod_attn
+
+struct ggml_tensor * ggml_lod_attn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * k_sums,
+        struct ggml_tensor  * v_sums,
+        struct ggml_tensor  * sel,
+        struct ggml_tensor  * state,
+        int                   page_size,
+        float                 scale) {
+    GGML_ASSERT(state->type  == GGML_TYPE_I32);
+    GGML_ASSERT(q->type      == GGML_TYPE_F32);
+    GGML_ASSERT(k_sums->type == GGML_TYPE_F32);
+    GGML_ASSERT(v_sums->type == GGML_TYPE_F32);
+    GGML_ASSERT(sel->type    == GGML_TYPE_I32);
+
+    GGML_ASSERT(q->ne[0] == k->ne[0]);
+    GGML_ASSERT(k->ne[1] == v->ne[1]);
+    GGML_ASSERT(k->ne[2] == v->ne[2]);
+    GGML_ASSERT(k_sums->ne[0] == k->ne[0]);
+    GGML_ASSERT(v_sums->ne[0] == v->ne[0]);
+    GGML_ASSERT(k_sums->ne[1] == v_sums->ne[1]);
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0); // GQA broadcast
+    GGML_ASSERT(page_size > 0);
+
+    // the whole page range plus the current tokens must be inside the cache view
+    GGML_ASSERT(k_sums->ne[1]*page_size <= k->ne[1]);
+
+    int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    ggml_set_op_params_i32(result, 0, page_size);
+    ggml_set_op_params_f32(result, 1, scale);
+
+    result->op   = GGML_OP_LOD_ATTN;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = k_sums;
+    result->src[4] = v_sums;
+    result->src[5] = sel;
+    result->src[6] = state;
 
     return result;
 }

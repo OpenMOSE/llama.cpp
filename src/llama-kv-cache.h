@@ -158,6 +158,13 @@ public:
 
     bool get_has_shift() const;
 
+    // LoD (level-of-detail) index over full-attention layers (env: LLAMA_LOD)
+    // per-layer page-sum tensors at KV-head resolution, used for sparse reads
+    bool     is_lod() const { return lod_page_size > 0; }
+    uint32_t get_lod_page_size() const { return lod_page_size; }
+    void     clear_lod_sums();
+    void     lod_truncate_sums(uint32_t p0);
+
     ggml_type type_k() const;
     ggml_type type_v() const;
 
@@ -175,6 +182,20 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il, uint32_t n_kv, const slot_info & sinfo) const;
+
+    // LoD views (single stream, cells must be contiguous from 0)
+    // per-head token range [t0, t0+nt): [n_embd_head, nt, n_head_kv]
+    ggml_tensor * get_k_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
+    ggml_tensor * get_v_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
+    // pages as rows for ggml_get_rows: [n_embd_gqa*page_size, n_pages]
+    ggml_tensor * get_k_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;
+    ggml_tensor * get_v_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;
+    // tokens as rows for ggml_get_rows: [n_embd_gqa, n]
+    ggml_tensor * get_k_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    ggml_tensor * get_v_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    // page-sum storage view [n_embd_head, np, n_head_kv] starting at page p0
+    ggml_tensor * get_k_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
+    ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
@@ -233,9 +254,16 @@ private:
 
         std::vector<ggml_tensor *> k_stream;
         std::vector<ggml_tensor *> v_stream;
+
+        // LoD page sums, F32 [n_embd_head, n_pages, n_head_kv], null when LoD is off
+        ggml_tensor * k_page = nullptr;
+        ggml_tensor * v_page = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
+
+    // LoD page size (0 = disabled); when enabled the V cache is kept non-transposed
+    uint32_t lod_page_size = 0;
 
     const uint32_t n_seq_max = 1;
     const uint32_t n_stream  = 1;
@@ -372,6 +400,19 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+
+    // LoD API (see llama_kv_cache)
+    bool     is_lod() const;
+    uint32_t get_lod_page_size() const;
+    uint32_t get_head() const; // first cell index of the current ubatch slot
+    ggml_tensor * get_k_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
+    ggml_tensor * get_v_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
+    ggml_tensor * get_k_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;
+    ggml_tensor * get_v_pagerows(ggml_context * ctx, int32_t il, uint32_t n_pages) const;
+    ggml_tensor * get_k_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    ggml_tensor * get_v_tokrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    ggml_tensor * get_k_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
+    ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory

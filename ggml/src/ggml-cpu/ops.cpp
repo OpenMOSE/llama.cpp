@@ -11919,6 +11919,177 @@ void ggml_compute_forward_fwht(const ggml_compute_params * params, ggml_tensor *
     }
 }
 
+// ggml_compute_forward_lod_attn
+
+void ggml_compute_forward_lod_attn(
+        const ggml_compute_params * params,
+        ggml_tensor * dst) {
+    const ggml_tensor * q   = dst->src[0];
+    const ggml_tensor * k   = dst->src[1];
+    const ggml_tensor * v   = dst->src[2];
+    const ggml_tensor * ks  = dst->src[3];
+    const ggml_tensor * vs  = dst->src[4];
+    const ggml_tensor * sel = dst->src[5];
+    const ggml_tensor * st  = dst->src[6];
+
+    const int32_t ps = ggml_get_op_params_i32(dst, 0);
+
+    float scale;
+    memcpy(&scale, (const char *) dst->op_params + sizeof(int32_t), sizeof(float));
+
+    const int64_t Dk    = q->ne[0];
+    const int64_t nq    = q->ne[1];
+    const int64_t Hq    = q->ne[2];
+    const int64_t Dv    = v->ne[0];
+    const int64_t T     = k->ne[1];
+    const int64_t Hkv   = k->ne[2];
+    const int64_t n_sel = sel->ne[0];
+
+    const int64_t g        = Hq/Hkv;
+    const int64_t prev_end = ((const int32_t *) st->data)[0];
+    const int64_t P        = ((const int32_t *) st->data)[1]; // complete pages to read
+    const int64_t tail0    = P*ps;
+
+    GGML_ASSERT(prev_end + nq <= T);
+    GGML_ASSERT(P <= ks->ne[1]);
+
+    // fold the current tokens into the page sums (their pages are all >= P, disjoint
+    // from everything read below)
+    if (params->ith == 0) {
+        for (int64_t t = 0; t < nq; ++t) {
+            const int64_t col  = prev_end + t;
+            const int64_t page = col/ps;
+            for (int64_t hh = 0; hh < Hkv; ++hh) {
+                float * ksd = (float *)((char *) ks->data + page*ks->nb[1] + hh*ks->nb[2]);
+                float * vsd = (float *)((char *) vs->data + page*vs->nb[1] + hh*vs->nb[2]);
+                const char * kc = (const char *) k->data + col*k->nb[1] + hh*k->nb[2];
+                const char * vc = (const char *) v->data + col*v->nb[1] + hh*v->nb[2];
+                for (int64_t d = 0; d < Dk; ++d) {
+                    ksd[d] += k->type == GGML_TYPE_F16 ? GGML_FP16_TO_FP32(((const ggml_fp16_t *) kc)[d]) : ((const float *) kc)[d];
+                }
+                for (int64_t d = 0; d < Dv; ++d) {
+                    vsd[d] += v->type == GGML_TYPE_F16 ? GGML_FP16_TO_FP32(((const ggml_fp16_t *) vc)[d]) : ((const float *) vc)[d];
+                }
+            }
+        }
+    }
+    ggml_barrier(params->threadpool);
+
+    const float logn    = logf((float) ps);
+    const float inv_ps  = 1.0f/ps;
+
+    GGML_ASSERT(Dv <= 1024);
+    GGML_ASSERT(k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
+    GGML_ASSERT(v->type == GGML_TYPE_F32 || v->type == GGML_TYPE_F16);
+
+    const int32_t * sel_d = (const int32_t *) sel->data;
+
+    const bool k_f16 = k->type == GGML_TYPE_F16;
+    const bool v_f16 = v->type == GGML_TYPE_F16;
+
+    const int64_t n_rows = nq*Hq;
+
+    for (int64_t row = params->ith; row < n_rows; row += params->nth) {
+        const int64_t qi = row/Hq;
+        const int64_t h  = row%Hq;
+        const int64_t hk = h/g;
+
+        const float * qp = (const float *)((const char *) q->data + qi*q->nb[1] + h*q->nb[2]);
+
+        const int64_t limit = prev_end + qi; // last visible position, inclusive
+
+        float m   = -INFINITY;
+        float den = 0.0f;
+        float acc[1024] = { 0.0f };
+
+        // one streaming softmax term: logit + value pointer (+ value scale)
+        auto add_term = [&](float logit, const char * vptr, bool vf16, float vscale) {
+            float w;
+            if (logit > m) {
+                const float e = expf(m - logit);
+                den *= e;
+                for (int64_t d = 0; d < Dv; ++d) {
+                    acc[d] *= e;
+                }
+                m = logit;
+                w = 1.0f;
+            } else {
+                w = expf(logit - m);
+            }
+            den += w;
+            if (vf16) {
+                const ggml_fp16_t * vp = (const ggml_fp16_t *) vptr;
+                for (int64_t d = 0; d < Dv; ++d) {
+                    acc[d] += w*vscale*GGML_FP16_TO_FP32(vp[d]);
+                }
+            } else {
+                const float * vp = (const float *) vptr;
+                for (int64_t d = 0; d < Dv; ++d) {
+                    acc[d] += w*vscale*vp[d];
+                }
+            }
+        };
+
+        auto dot_k = [&](const char * kptr, bool kf16) {
+            float s = 0.0f;
+            if (kf16) {
+                const ggml_fp16_t * kp = (const ggml_fp16_t *) kptr;
+                for (int64_t d = 0; d < Dk; ++d) {
+                    s += qp[d]*GGML_FP16_TO_FP32(kp[d]);
+                }
+            } else {
+                const float * kp = (const float *) kptr;
+                for (int64_t d = 0; d < Dk; ++d) {
+                    s += qp[d]*kp[d];
+                }
+            }
+            return s;
+        };
+
+        // tier 1: unselected page summaries (count-weighted means with a log(n) size term)
+        for (int64_t p = 0; p < P; ++p) {
+            bool selected = false;
+            for (int64_t i = 0; i < n_sel; ++i) {
+                if (sel_d[i] == p) {
+                    selected = true;
+                    break;
+                }
+            }
+            if (selected) {
+                continue;
+            }
+            const float * ksp = (const float *)((const char *) ks->data + p*ks->nb[1] + hk*ks->nb[2]);
+            float s = 0.0f;
+            for (int64_t d = 0; d < Dk; ++d) {
+                s += qp[d]*ksp[d];
+            }
+            add_term(s*inv_ps*scale + logn, (const char *) vs->data + p*vs->nb[1] + hk*vs->nb[2], false, inv_ps);
+        }
+
+        // tier 2: leaves of the selected pages, read exactly from the cache
+        for (int64_t i = 0; i < n_sel; ++i) {
+            const int64_t p = sel_d[i];
+            for (int64_t j = 0; j < ps; ++j) {
+                const int64_t col = p*ps + j;
+                const char * kp = (const char *) k->data + col*k->nb[1] + hk*k->nb[2];
+                add_term(dot_k(kp, k_f16)*scale, (const char *) v->data + col*v->nb[1] + hk*v->nb[2], v_f16, 1.0f);
+            }
+        }
+
+        // tier 3: raw tail plus the current tokens, causal
+        for (int64_t col = tail0; col <= limit; ++col) {
+            const char * kp = (const char *) k->data + col*k->nb[1] + hk*k->nb[2];
+            add_term(dot_k(kp, k_f16)*scale, (const char *) v->data + col*v->nb[1] + hk*v->nb[2], v_f16, 1.0f);
+        }
+
+        float * out = (float *)((char *) dst->data + h*dst->nb[1] + qi*dst->nb[2]);
+        const float id = den > 0.0f ? 1.0f/den : 0.0f;
+        for (int64_t d = 0; d < Dv; ++d) {
+            out[d] = acc[d]*id;
+        }
+    }
+}
+
 // ggml_compute_forward_lightning_indexer
 
 void ggml_compute_forward_lightning_indexer(

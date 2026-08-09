@@ -324,6 +324,9 @@ void ggml_backend_tensor_get_2d_async(ggml_backend_t backend, const struct ggml_
 void ggml_backend_tensor_set(struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     GGML_ASSERT(tensor);
     ggml_backend_buffer_t buf = tensor->view_src ? tensor->view_src->buffer : tensor->buffer;
+    if (buf == NULL) {
+        GGML_LOG_ERROR("%s: tensor '%s' has no buffer\n", __func__, tensor->name);
+    }
     GGML_ASSERT(buf != NULL && "tensor buffer not set");
 
     if (size == 0) {

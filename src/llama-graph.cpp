@@ -1,5 +1,7 @@
 #include "llama-graph.h"
 
+#include <algorithm>
+
 #include "llama-impl.h"
 #include "llama-model.h"
 #include "llama-batch.h"
@@ -572,6 +574,14 @@ void llm_graph_input_attn_lod::set_input(const llama_ubatch * ubatch) {
         ggml_backend_tensor_set(lod_meta, meta, 0, sizeof(meta));
     }
 
+    if (lod_meanidx) {
+        std::vector<int32_t> idx(lod_meanidx->ne[0]);
+        for (int64_t i = 0; i < lod_meanidx->ne[0]; ++i) {
+            idx[i] = (int32_t) i;
+        }
+        ggml_backend_tensor_set(lod_meanidx, idx.data(), 0, ggml_nbytes(lod_meanidx));
+    }
+
     if (lod_pmeta) {
         const float pf = (float) P_full;
         ggml_backend_tensor_set(lod_pmeta, &pf, 0, sizeof(pf));
@@ -636,6 +646,12 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
     // view offsets into the graph and only hold within one page window
     if (!lod_meta && !stat_fa) {
         res &= P_new == P_full;
+    }
+
+    if (stat_fa && mask_S > 0) {
+        // the mask-direct graph bakes the fattn span; rebuild at span boundaries
+        const uint32_t S_new = std::min<uint32_t>(GGML_PAD(prev_end_new + params.ubatch.n_tokens, 4096), cparams.n_ctx_seq);
+        res &= S_new == mask_S;
     }
 
     if (stat_fa) {
@@ -1174,11 +1190,11 @@ void llm_graph_input_mem_hybrid::set_input(const llama_ubatch * ubatch) {
         mctx->get_attn()->set_input_kq_mask(inp_attn->self_kq_mask, ubatch, cparams.causal_attn);
     }
 
-    if (inp_attn->self_k_rot) {
+    if (inp_attn->self_k_rot && inp_attn->self_k_rot->buffer) {
         mctx->get_attn()->set_input_k_rot(inp_attn->self_k_rot);
     }
 
-    if (inp_attn->self_v_rot) {
+    if (inp_attn->self_v_rot && inp_attn->self_v_rot->buffer) {
         mctx->get_attn()->set_input_v_rot(inp_attn->self_v_rot);
     }
 
@@ -3340,10 +3356,16 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     inp->self_v_idxs = mctx_base->build_input_v_idxs(ctx0, ubatch);
 
     // only allocated when consumed: the fused read needs no mask, unused inputs have no buffer
+    // q8_0 caches ride the same paths as F16: fattn reads them via its internal
+    // dequant, the fused decode kernel dequantizes q8_0 blocks in-kernel
+    const auto lod_type_ok = [](ggml_type t) {
+        return !ggml_is_quantized(t) || t == GGML_TYPE_Q8_0;
+    };
     const bool use_fa_pre = cparams.flash_attn && n_tokens > 8 &&
-            mctx_base->type_k() == GGML_TYPE_F16 && mctx_base->type_v() == GGML_TYPE_F16;
+            (mctx_base->type_k() == GGML_TYPE_F16 || mctx_base->type_k() == GGML_TYPE_Q8_0) &&
+            (mctx_base->type_v() == GGML_TYPE_F16 || mctx_base->type_v() == GGML_TYPE_Q8_0);
     const bool use_fused_pre = !use_fa_pre && cparams.lod_fused && inp->kP > 0 && n_tokens <= 8 &&
-            !ggml_is_quantized(mctx_base->type_k()) && !ggml_is_quantized(mctx_base->type_v());
+            lod_type_ok(mctx_base->type_k()) && lod_type_ok(mctx_base->type_v());
 
     // the mask is generated on-device in build_attn (regular structure, no upload)
 
@@ -3377,6 +3399,19 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
             prev_end % ps == 0 && n_tokens % ps == 0 && inp->catchup_len == 0 &&
             inp->n_exact_pad == ps + n_tokens;
 
+    // mask-direct prefill (ablation env LLAMA_LOD_PREFILL=mask): page means are
+    // refreshed from the sums every prefill ubatch and read as extra fattn columns
+    // mask-direct prefill needs no gather at all - see use_mask_pre below
+    static const char * prefill_env_pre = getenv("LLAMA_LOD_PREFILL");
+    const bool mask_pre = use_fa_pre && prefill_env_pre != nullptr && strcmp(prefill_env_pre, "mask") == 0 &&
+            mctx_base->has_lod_means() && inp->kP > 0;
+
+    if (mask_pre) {
+        inp->lod_meanidx = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, inp->P_cap);
+        ggml_set_input(inp->lod_meanidx);
+        ggml_set_name(inp->lod_meanidx, "lod_meanidx");
+    }
+
     if (inp->stat_fa) {
         inp->lod_pmeta = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
         ggml_set_input(inp->lod_pmeta);
@@ -3400,7 +3435,7 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     // the exact tier reads through a gather: dequantizes quantized caches, and keeps
     // the FA graph shape static across ubatches (the moving tail window lives in the
     // index input, not in view offsets)
-    if (ggml_is_quantized(mctx_base->type_k()) || ggml_is_quantized(mctx_base->type_v()) || use_fa_pre) {
+    if ((((ggml_is_quantized(mctx_base->type_k()) || ggml_is_quantized(mctx_base->type_v())) && !use_fused_pre) || use_fa_pre) && !mask_pre) {
         inp->lod_arange = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, inp->n_exact_pad);
         ggml_set_input(inp->lod_arange);
         ggml_set_name(inp->lod_arange, "lod_arange");
@@ -3441,8 +3476,9 @@ ggml_tensor * llm_graph_context::build_attn(
     const uint32_t P_full     = inp->P_full;
     const uint32_t tail_start = inp->tail_start;
     const uint32_t n_exact    = inp->n_exact_pad;
-    const uint32_t kP         = inp->kP;
-    const uint32_t NL         = inp->NL;
+    // per-layer budget (inp->kP is the max-based value used by the shared gates)
+    const uint32_t kP         = std::min<uint32_t>(cparams.lod_top_pages_l[il], P_full);
+    const uint32_t NL         = kP*ps;
 
     const int64_t n_head_kv      = k_cur->ne[1];
     const int64_t n_embd_head_k  = k_cur->ne[0];
@@ -3458,8 +3494,11 @@ ggml_tensor * llm_graph_context::build_attn(
             (q_cache || (mctx_cur->type_k() == GGML_TYPE_F16 && mctx_cur->type_v() == GGML_TYPE_F16));
 
     // fused single-kernel read (decode): reads the leaves straight from the cache, no gather
+    const auto lod_type_ok = [](ggml_type t) {
+        return !ggml_is_quantized(t) || t == GGML_TYPE_Q8_0;
+    };
     const bool use_fused = !use_fa && cparams.lod_fused && kP > 0 && n_tokens <= 8 && n_embd_head_v <= 1024 &&
-            !ggml_is_quantized(mctx_cur->type_k()) && !ggml_is_quantized(mctx_cur->type_v());
+            lod_type_ok(mctx_cur->type_k()) && lod_type_ok(mctx_cur->type_v());
 
     // fold this ubatch into the page sums; sums accumulate from the raw (pre-quantization) K/V
     {
@@ -3565,14 +3604,34 @@ ggml_tensor * llm_graph_context::build_attn(
         }
     }
 
+    // mask-direct prefill: refresh ALL page-mean rows from the sums (correct after any
+    // decode/rollback history - the sums are authoritative; ~0.03% of an ubatch)
+    if (inp->lod_meanidx != nullptr && use_fa) {
+        const uint32_t P_cap = inp->P_cap;
+
+        auto refresh = [&](ggml_tensor * sums, ggml_tensor * rows) {
+            ggml_tensor * t = ggml_cont(ctx0, ggml_permute(ctx0, sums, 0, 2, 1, 3)); // [D, Hkv, P_cap]
+            t = ggml_reshape_2d(ctx0, t, t->ne[0]*t->ne[1], P_cap);                  // cache row layout
+            t = ggml_scale(ctx0, t, 1.0f/ps);
+            ggml_build_forward_expand(gf, ggml_set_rows(ctx0, rows, t, inp->lod_meanidx));
+        };
+        refresh(mctx_cur->get_k_page_sums(ctx0, il, 0, P_cap), mctx_cur->get_k_meanrows(ctx0, il, P_cap));
+        refresh(mctx_cur->get_v_page_sums(ctx0, il, 0, P_cap), mctx_cur->get_v_meanrows(ctx0, il, P_cap));
+    }
+
     ggml_tensor * q = ggml_permute(ctx0, q_cur, 0, 2, 1, 3); // [D_k, n_tokens, n_head_q]
 
     // on-device mask parts (no CPU fill, no upload): the structure is fully regular.
     // exact tier: (i, j) visible iff tail_start + i <= prev_end + j; built from two
     // aranges and log(step(x)) for an exact 0 / -inf band
-    ggml_tensor * m_band = nullptr; // [n_exact_pad, n_tokens]
-    ggml_tensor * m_leaf = nullptr; // [NL, n_tokens], zeros
-    if (!use_fused) {
+    // NL-sized parts are shareable across layers only under a uniform budget
+    const bool kp_uniform = cparams.lod_top_pages_l.empty() ||
+            std::all_of(cparams.lod_top_pages_l.begin(), cparams.lod_top_pages_l.end(),
+                    [&](uint32_t v) { return v == cparams.lod_top_pages_l[0]; });
+
+    ggml_tensor * m_band = inp->sh_band; // [n_exact_pad, n_tokens]
+    ggml_tensor * m_leaf = kp_uniform ? inp->sh_leaf : nullptr; // [NL, n_tokens], zeros
+    if (!use_fused && m_band == nullptr) {
         const float C = (float) prev_end - (float) tail_start;
 
         ggml_tensor * t_i = ggml_arange(ctx0, -C - 0.5f, -C - 0.5f + (float) n_exact, 1.0f); // i - C - 0.5
@@ -3583,9 +3642,17 @@ ggml_tensor * llm_graph_context::build_attn(
         m_band = ggml_sub(ctx0, m_band, ggml_reshape_2d(ctx0, t_i, n_exact, 1)); // j - i + C + 0.5
         m_band = ggml_log(ctx0, ggml_step(ctx0, m_band));
 
+        inp->sh_band = m_band;
+
         if (kP > 0) {
             m_leaf = ggml_fill_inplace(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, NL, n_tokens), 0.0f);
+            if (kp_uniform) {
+                inp->sh_leaf = m_leaf;
+            }
         }
+    }
+    if (!use_fused && m_leaf == nullptr && kP > 0) {
+        m_leaf = ggml_fill_inplace(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, NL, n_tokens), 0.0f);
     }
 
     ggml_tensor * scores = nullptr;
@@ -3602,13 +3669,16 @@ ggml_tensor * llm_graph_context::build_attn(
     const bool     stat_fa = inp->stat_fa;
     const uint32_t Pv      = stat_fa ? inp->P_cap : P_full;
 
-    ggml_tensor * logv = nullptr; // [Pv]: 0 for valid pages, -inf past the runtime count
-    if (stat_fa) {
+    ggml_tensor * logv = inp->sh_logv; // [Pv]: 0 for valid pages, -inf past the runtime count
+    if (stat_fa && logv == nullptr) {
         ggml_tensor * pr = ggml_repeat(ctx0, inp->lod_pmeta, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, Pv));
         logv = ggml_log(ctx0, ggml_step(ctx0, ggml_sub(ctx0, pr, ggml_arange(ctx0, 0.5f, (float) Pv + 0.5f, 1.0f))));
+        inp->sh_logv = logv;
     }
 
-    if (kP > 0 && !use_fused) {
+    const bool use_mask_read = use_fa && inp->lod_meanidx != nullptr;
+
+    if (kP > 0 && !use_fused && !use_mask_read) {
         // page scores at query-head resolution; 1/ps turns the stored sums into means
         ggml_tensor * kp = mctx_cur->get_k_page_sums(ctx0, il, 0, Pv);
 
@@ -3629,7 +3699,23 @@ ggml_tensor * llm_graph_context::build_attn(
         if (n_tokens == 1) {
             s1 = ggml_reshape_2d(ctx0, scores, Pv, n_head_q);
         } else {
-            s1 = ggml_pool_2d(ctx0, scores, GGML_OP_POOL_MAX, 1, n_tokens, 1, n_tokens, 0, 0); // [Pv, 1, n_head_q]
+            // pool the selection over the TAIL of the segment: the last queries (the
+            // ones about to be encoded with the least right-context) dominate what the
+            // segment needs to retrieve; full-segment pooling lets bulk filler queries
+            // crowd out e.g. a final question's needle pages (measured: needle pages
+            // rank top-10 at decode but miss the prefill segment's shared top-k).
+            // ablation: LLAMA_LOD_SELPOOL=all restores full-segment pooling
+            static const char * pool_env = getenv("LLAMA_LOD_SELPOOL");
+            const bool pool_tail = pool_env != nullptr && strcmp(pool_env, "tail") == 0;
+
+            const int64_t n_pool = pool_tail ? std::min<int64_t>(n_tokens, 512) : n_tokens;
+
+            ggml_tensor * sc = scores;
+            if (n_pool < n_tokens) {
+                sc = ggml_view_3d(ctx0, scores, Pv, n_pool, n_head_q,
+                        scores->nb[1], scores->nb[2], (n_tokens - n_pool)*scores->nb[1]);
+            }
+            s1 = ggml_pool_2d(ctx0, sc, GGML_OP_POOL_MAX, 1, n_pool, 1, n_pool, 0, 0); // [Pv, 1, n_head_q]
             s1 = ggml_reshape_2d(ctx0, s1, Pv, n_head_q);
         }
 
@@ -3696,7 +3782,171 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * cur;
 
-    if (use_fa) {
+    if (use_fa && inp->lod_meanidx != nullptr) {
+        // mask-direct prefill (ablation LLAMA_LOD_PREFILL=mask): flash attention over
+        // [cache span | page-mean columns] with the whole read expressed as a mask -
+        // no gathers. Selection is PER 32-QUERY BLOCK (measured: a single shared set
+        // cannot serve a whole segment - query granularity is everything, head
+        // granularity is nearly free - so pages stay layer/head-shared per block).
+        const uint32_t P_cap  = inp->P_cap;
+        const uint32_t S      = std::min<uint32_t>(GGML_PAD(prev_end + n_tokens, 4096), cparams.n_ctx_seq);
+        inp->mask_S = S;
+        const uint32_t P_span = S/ps;
+        static const char * qb_env = getenv("LLAMA_LOD_QB");
+        const uint32_t QB     = qb_env != nullptr ? std::max(1, atoi(qb_env)) : 32;
+        const uint32_t n_blk  = (n_tokens + QB - 1)/QB;
+        const uint32_t n_qpad = n_blk*QB;
+
+        const float c0 = (float) prev_end - (float) tail_start; // constant under ps | n_tokens
+
+        // runtime page count as an on-device scalar (stat_fa) or baked constant
+        ggml_tensor * prt = nullptr; // [1] = P_full as f32
+        if (inp->lod_pmeta != nullptr) {
+            prt = inp->lod_pmeta;
+        }
+
+        // ---- per-block selection over the page tier (always capacity-sized here;
+        // invalid pages are excluded by a local validity vector)
+        ggml_tensor * logv_m = logv != nullptr ? logv : inp->sh_mlogv;
+        if (logv_m == nullptr) {
+            ggml_tensor * ap = ggml_arange(ctx0, 0.5f, (float) P_cap + 0.5f, 1.0f);
+            logv_m = ggml_log(ctx0, ggml_step(ctx0, ggml_scale_bias(ctx0, ap, -1.0f, (float) P_full)));
+            inp->sh_mlogv = logv_m;
+        }
+
+        ggml_tensor * kp = mctx_cur->get_k_page_sums(ctx0, il, 0, P_cap);
+        ggml_tensor * sc = ggml_mul_mat(ctx0, kp, q); // [P_cap, n_tokens, Hq]
+        ggml_mul_mat_set_prec(sc, GGML_PREC_F32);
+        if (n_qpad > n_tokens) {
+            sc = ggml_concat(ctx0, sc,
+                    ggml_fill_inplace(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, P_cap, n_qpad - n_tokens, n_head_q), -INFINITY), 1);
+        }
+        ggml_tensor * sb = ggml_pool_2d(ctx0, sc, GGML_OP_POOL_MAX, 1, QB, 1, QB, 0, 0);     // [P_cap, n_blk, Hq]
+        sb = ggml_cont(ctx0, ggml_permute(ctx0, sb, 0, 2, 1, 3));                            // [P_cap, Hq, n_blk]
+        sb = ggml_pool_2d(ctx0, sb, GGML_OP_POOL_MAX, 1, n_head_q, 1, n_head_q, 0, 0);       // [P_cap, 1, n_blk]
+        sb = ggml_reshape_2d(ctx0, sb, P_cap, n_blk);
+        sb = ggml_add(ctx0, sb, ggml_reshape_2d(ctx0, logv_m, P_cap, 1));
+
+        // selection-only region tier: with thousands of candidate pages the page-level
+        // score ranking drowns (measured: works at ~500 pages, dies at ~2000). Prune
+        // per block to the top regions (max over 8 child pages - no mean dilution),
+        // then pick pages only inside them. Read math is untouched.
+        const uint32_t RG = 8;
+        if (P_cap % RG == 0 && P_cap/RG >= 64) {
+            const uint32_t nreg = P_cap/RG;
+            const uint32_t kR   = std::min<uint32_t>(cparams.lod_top_regions_l[il], nreg);
+
+            ggml_tensor * rb = ggml_pool_2d(ctx0, ggml_reshape_3d(ctx0, sb, RG, nreg, n_blk),
+                    GGML_OP_POOL_MAX, RG, 1, RG, 1, 0, 0);              // [1, nreg, n_blk]
+            rb = ggml_reshape_2d(ctx0, ggml_cont(ctx0, rb), nreg, n_blk);
+            ggml_tensor * selr = ggml_top_k(ctx0, rb, kR);              // [kR, n_blk]
+
+            ggml_tensor * rk = ggml_cont(ctx0, ggml_repeat(ctx0,
+                    ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, 1, 1),
+                    ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, nreg, n_blk)));
+            rk = ggml_fill_inplace(ctx0, rk, -INFINITY);
+            {
+                ggml_tensor * zer = ggml_fill_inplace(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, kR, n_blk), 0.0f);
+                rk = ggml_set_rows(ctx0, rk, zer, ggml_reshape_2d(ctx0, selr, kR, n_blk));
+            }
+            ggml_tensor * rke = ggml_repeat(ctx0, ggml_reshape_3d(ctx0, rk, 1, nreg, n_blk),
+                    ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, RG, nreg, n_blk));
+            sb = ggml_add(ctx0, sb, ggml_reshape_2d(ctx0, rke, P_cap, n_blk));
+        }
+
+        ggml_tensor * selb = ggml_top_k(ctx0, sb, kP); // [kP, n_blk]
+
+        // ---- token-tier mask: causal base (one formula) + per-block page-kill term
+        ggml_tensor * base = inp->sh_mbase;
+        if (base == nullptr) {
+            ggml_tensor * a_col = ggml_arange(ctx0, 0.0f, (float) S, 1.0f);
+            ggml_tensor * a_row = ggml_arange(ctx0, 0.0f, (float) n_tokens, 1.0f);
+            base = ggml_repeat(ctx0, ggml_reshape_2d(ctx0, a_row, 1, n_tokens),
+                    ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, S, n_tokens));
+            base = ggml_sub(ctx0, base, ggml_reshape_2d(ctx0, a_col, S, 1)); // row - col
+            if (prt != nullptr) {
+                ggml_tensor * off = ggml_scale(ctx0, prt, (float) ps); // P_rt*ps
+                base = ggml_add(ctx0, base, ggml_reshape_2d(ctx0, off, 1, 1));
+                base = ggml_scale_bias(ctx0, base, 1.0f, c0 + 0.5f);
+            } else {
+                base = ggml_scale_bias(ctx0, base, 1.0f, (float) tail_start + c0 + 0.5f);
+            }
+            base = ggml_log(ctx0, ggml_step(ctx0, base)); // 0 visible / -inf beyond
+            inp->sh_mbase = base;
+        }
+
+        // page-kill column: -inf for complete pages, 0 for the tail region
+        ggml_tensor * kill = inp->sh_mkill;
+        if (kill == nullptr) {
+            ggml_tensor * a_p = ggml_arange(ctx0, 0.5f, (float) P_span + 0.5f, 1.0f); // p + 0.5
+            if (prt != nullptr) {
+                kill = ggml_sub(ctx0, a_p, ggml_repeat(ctx0, prt, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, P_span)));
+            } else {
+                kill = ggml_scale_bias(ctx0, a_p, 1.0f, -(float) P_full);
+            }
+            kill = ggml_log(ctx0, ggml_step(ctx0, kill)); // -inf p < P_rt, 0 past
+            inp->sh_mkill = kill;
+        }
+
+        ggml_tensor * km = ggml_cont(ctx0, ggml_repeat(ctx0, ggml_reshape_3d(ctx0, kill, 1, P_span, 1),
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, P_span, n_blk)));
+        {
+            ggml_tensor * zer = ggml_fill_inplace(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, kP, n_blk), 0.0f);
+            km = ggml_set_rows(ctx0, km, zer, ggml_reshape_2d(ctx0, selb, kP, n_blk)); // un-kill selected
+        }
+        // expand pages -> token columns, blocks -> token rows
+        ggml_tensor * kt = ggml_repeat(ctx0, ggml_reshape_3d(ctx0, km, 1, P_span, n_blk),
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, ps, P_span, n_blk));
+        kt = ggml_reshape_2d(ctx0, kt, S, n_blk);
+        kt = ggml_repeat(ctx0, ggml_reshape_3d(ctx0, kt, S, 1, n_blk),
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, S, QB, n_blk));
+        kt = ggml_view_2d(ctx0, ggml_reshape_2d(ctx0, kt, S, n_qpad), S, n_tokens, (size_t) S*sizeof(float), 0);
+
+        ggml_tensor * m_tok = ggml_add(ctx0, base, kt);
+
+        // ---- mean-column mask: logn + validity, selected means silenced per block
+        ggml_tensor * ms = ggml_fill_inplace(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, P_cap, n_blk), logf((float) ps));
+        ms = ggml_add(ctx0, ms, ggml_reshape_3d(ctx0, logv_m, 1, P_cap, 1));
+        ms = ggml_cont(ctx0, ms);
+        {
+            ggml_tensor * neg = ggml_fill_inplace(ctx0, ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, kP, n_blk), -INFINITY);
+            ms = ggml_set_rows(ctx0, ms, neg, ggml_reshape_2d(ctx0, selb, kP, n_blk));
+        }
+        ggml_tensor * mst = ggml_repeat(ctx0, ggml_reshape_3d(ctx0, ms, P_cap, 1, n_blk),
+                ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, P_cap, QB, n_blk));
+        mst = ggml_view_2d(ctx0, ggml_reshape_2d(ctx0, mst, P_cap, n_qpad), P_cap, n_tokens, (size_t) P_cap*sizeof(float), 0);
+
+        // ---- K/V: resident mean columns first, cache span last (+ zeroed pad rows
+        // reserved inside the mean tensors - all-zero quantized blocks decode to 0.0).
+        // fattn's mask scan can only truncate a fully-masked KV suffix, so the
+        // causally-dead token tail must sit at the end of the axis; a mean tier at the
+        // end would keep every query tile pinned to the full span. The concat runs on
+        // contiguous 2D row tensors: that is the byte-copy path, which works for
+        // quantized types too; the result is re-viewed in fattn shape.
+        const uint32_t N_set  = S + P_cap;
+        const uint32_t n_fpad = GGML_PAD(N_set, 256) - N_set;
+
+        ggml_tensor * kr = ggml_concat(ctx0, mctx_cur->get_k_meanrows(ctx0, il, P_cap + n_fpad), mctx_cur->get_k_tokrows(ctx0, il, S), 1);
+        ggml_tensor * vr = ggml_concat(ctx0, mctx_cur->get_v_meanrows(ctx0, il, P_cap + n_fpad), mctx_cur->get_v_tokrows(ctx0, il, S), 1);
+
+        ggml_tensor * kk = ggml_view_3d(ctx0, kr, n_embd_head_k, N_set + n_fpad, n_head_kv,
+                kr->nb[1], ggml_row_size(kr->type, n_embd_head_k), 0);
+        ggml_tensor * vv = ggml_view_3d(ctx0, vr, n_embd_head_v, N_set + n_fpad, n_head_kv,
+                vr->nb[1], ggml_row_size(vr->type, n_embd_head_v), 0);
+
+        ggml_tensor * mask = mst;
+        if (n_fpad > 0) {
+            mask = ggml_concat(ctx0, mask, ggml_fill_inplace(ctx0, ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, n_fpad, n_tokens), -INFINITY), 0);
+        }
+        mask = ggml_concat(ctx0, mask, m_tok, 0); // [P_cap + n_fpad + S, n_tokens]
+        mask = ggml_cast(ctx0, ggml_reshape_3d(ctx0, mask, N_set + n_fpad, n_tokens, 1), GGML_TYPE_F16);
+
+        cur = ggml_flash_attn_ext(ctx0, q, kk, vv, mask, kq_scale, 0.0f, 0.0f);
+        res->add_fused_node({LLM_FUSED_OP_FLASH_ATTN, cur, il});
+        ggml_flash_attn_ext_set_prec(cur, GGML_PREC_F32);
+
+        cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
+    } else if (use_fa) {
         // one flash-attention call over the compact [leaf | exact | summary] KV set
         // (quantized caches read the exact tier through a dequantizing gather)
         ggml_tensor * ke;
@@ -3736,7 +3986,14 @@ ggml_tensor * llm_graph_context::build_attn(
             m_sum = ggml_set_rows(ctx0, m_sum, neg, ggml_reshape_3d(ctx0, sel, kP, 1, 1));
             m_sum = ggml_reshape_3d(ctx0, m_sum, Pv, n_tokens, 1);
 
-            ggml_tensor * m_pre = ggml_reshape_3d(ctx0, ggml_concat(ctx0, m_leaf, m_band, 0), NL + n_exact, n_tokens, 1);
+            ggml_tensor * mpre2 = kp_uniform ? inp->sh_mpre : nullptr;
+            if (mpre2 == nullptr) {
+                mpre2 = ggml_concat(ctx0, m_leaf, m_band, 0);
+                if (kp_uniform) {
+                    inp->sh_mpre = mpre2;
+                }
+            }
+            ggml_tensor * m_pre = ggml_reshape_3d(ctx0, mpre2, NL + n_exact, n_tokens, 1);
 
             mask = ggml_concat(ctx0, m_pre, m_sum, 0);
         } else {
@@ -3775,7 +4032,7 @@ ggml_tensor * llm_graph_context::build_attn(
         cur = ggml_lod_attn(ctx0, q, kf, vf,
                 mctx_cur->get_k_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
                 mctx_cur->get_v_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
-                nullptr, inp->lod_meta, ps, kq_scale, cparams.lod_top_pages,
+                nullptr, inp->lod_meta, ps, kq_scale, cparams.lod_top_pages_l[il],
                 cparams.lod_sel_head && n_head_kv > 1);
         cb(cur, "lod_fused", il);
 

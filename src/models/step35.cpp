@@ -270,7 +270,7 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
 
             const float kq_scale = 1.0f / sqrtf(float(n_embd_head_k));
             ggml_tensor * attn_out;
-            if (inp_lod && !is_swa) {
+            if (inp_lod && !is_swa && cparams.lod_top_pages_l[il] > 0) {
                 attn_out = build_attn(inp_lod,
                         nullptr, nullptr, nullptr,
                         Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);

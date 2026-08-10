@@ -581,6 +581,10 @@ static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_
             std::vector<ggml_fp16_t> tmp(h.size());
             ggml_fp32_to_fp16_row(h.data(), tmp.data(), h.size());
             ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size()*sizeof(ggml_fp16_t));
+        } else if (ggml_is_quantized(c.tkv)) {
+            std::vector<uint8_t> tmp(ggml_row_size(c.tkv, h.size()));
+            ggml_quantize_chunk(c.tkv, h.data(), tmp.data(), 0, h.size()/D, D, nullptr);
+            ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size());
         } else {
             ggml_backend_tensor_set(t, h.data(), 0, h.size()*sizeof(float));
         }
@@ -614,12 +618,15 @@ static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_
         for (size_t i = 0; i < ya.size(); i++) {
             md = std::max(md, fabsf(ya[i] - yb[i]));
         }
-        ok = md == 0.0f;
+        // same-kernel comparisons come out bitwise (0); cross-kernel ablation variants
+        // (GGML_LOD_SPLIT=...) legitimately differ at float ULP level. A selection flip
+        // or a real defect shows up orders of magnitude above this bound.
+        ok = md <= 1e-6f;
     }
 
     printf("  lod fused-sel D=%3d Hkv=%d g=%d ps=%2d P=%2d tail=%2d nq=%2d n_top=%2d %s: %s (max_diff=%g)\n",
             (int) D, (int) Hkv, (int) c.g, (int) ps, (int) P, (int) c.n_tail, (int) nq, (int) n_top,
-            c.tkv == GGML_TYPE_F16 ? "f16" : "f32", ok ? "OK" : "FAIL", (double) md);
+            c.tkv == GGML_TYPE_F16 ? "f16" : c.tkv == GGML_TYPE_Q8_0 ? "q8_0" : "f32", ok ? "OK" : "FAIL", (double) md);
 
     ggml_backend_buffer_free(buf);
     ggml_free(ctx);
@@ -630,7 +637,8 @@ static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_
 // GPU clocked up, so per-kernel times from rocprof on this binary are trustworthy)
 static void run_bench(ggml_backend_t backend) {
     const int64_t D = 512, Hkv = 4, g = 8, Hq = g*Hkv, nq = 1;
-    const int64_t ps = 64, P = 256;
+    const int64_t ps = 64;
+    const int64_t P = getenv("LOD_BENCH_P") ? atoll(getenv("LOD_BENCH_P")) : 256;
     const int64_t n_top = getenv("LOD_BENCH_TOP") ? atoll(getenv("LOD_BENCH_TOP")) : 32;
     const int64_t P_cap = P + 8, T_cap = P_cap*ps;
     const int64_t prev_end = P*ps + 32;
@@ -731,6 +739,7 @@ int main(void) {
         }
         for (const lod_case & fc : { lod_case {  64, 2, 2, 16, 8, 5, 1, 0, false, GGML_TYPE_F32 },
                                      lod_case {  64, 2, 2, 16, 8, 5, 3, 0, false, GGML_TYPE_F16 },
+                                     lod_case {  64, 2, 2, 16, 8, 5, 3, 0, false, GGML_TYPE_Q8_0 },
                                      lod_case { 128, 4, 8, 16, 8, 5, 1, 0, false, GGML_TYPE_F16 } }) {
             for (int64_t n_top : { (int64_t) 3, (int64_t) 8, (int64_t) 10 }) {
                 const int r = run_fused_case(fc, backend, n_top);
@@ -753,7 +762,9 @@ int main(void) {
         // real model head geometries: gemma4 full layers (D=512) and qwen3.6 (D=256)
         for (const lod_case & fc : { lod_case { 512, 4, 8, 64, 8, 33, 1, 0, false, GGML_TYPE_F16 },
                                      lod_case { 512, 4, 8, 64, 8, 33, 4, 0, false, GGML_TYPE_F16 },
-                                     lod_case { 256, 4, 6, 64, 8, 33, 1, 0, false, GGML_TYPE_F16 } }) {
+                                     lod_case { 512, 4, 8, 64, 8, 33, 1, 0, false, GGML_TYPE_Q8_0 },
+                                     lod_case { 256, 4, 6, 64, 8, 33, 1, 0, false, GGML_TYPE_F16 },
+                                     lod_case { 256, 4, 6, 64, 8, 33, 1, 0, false, GGML_TYPE_Q8_0 } }) {
             for (int64_t n_top : { (int64_t) 3, (int64_t) 8 }) {
                 const int r = run_fused_case(fc, backend, n_top);
                 if (r > 0) fails++;

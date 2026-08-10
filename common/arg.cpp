@@ -1628,10 +1628,11 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
-        {"--lod-top-pages"}, "N",
-        "LoD: pages read at leaf detail per layer (default: 32)",
-        [](common_params & params, int value) {
-            setenv("LLAMA_LOD_TOP_PAGES", std::to_string(value).c_str(), 1);
+        {"--lod-top-pages"}, "SPEC",
+        "LoD: per-layer read budgets. Value = PAGES[:REGIONS] or 'dense'.\n"
+        "e.g. \"64:32,5=192:64,11=dense,20-30=128\" (default: 32:64)",
+        [](common_params & params, const std::string & value) {
+            setenv("LLAMA_LOD_TOP_PAGES", value.c_str(), 1);
             GGML_UNUSED(params);
         }
     ));

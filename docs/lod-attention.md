@@ -16,7 +16,10 @@ exactly. The most recent tokens (the partial page plus the current ubatch) are a
 exactly ("tail"). Reference: `/home/mose/Projects/RWKVInside4/docs/lod1_spec.md` (LoD1;
 this port implements the all-pages branch, i.e. no region tier, valid to ~64k of context
 at the default settings). The full algorithm-level specification of this port - written
-for independent (e.g. PyTorch) re-implementation - is in `lod-attention-spec.md`.
+for independent (e.g. PyTorch) re-implementation - is in `lod-attention-spec.md`;
+the PyTorch reproduction package (naive reference + the production kernels wrapped
+as a torch extension + parity test) is in `lod-pytorch/`, and the current work state
+/ open investigations are in `lod-attention-handover.md`.
 
 ## Usage
 
@@ -82,6 +85,16 @@ decode graph shape is fully static, reused every token, and replayed as one HIP 
 selection ranks the *runtime* page count, so it never lags the static graph. Quantized
 caches currently fall back to the composed-op path for decode (correct, ~13% slower -
 same order as the dense q8_0 penalty).
+
+Ablation switches for the decode read (same binary): `GGML_LOD_SPLIT=lds` selects an
+LDS-staged split kernel (one block per KV head, K/V staged through shared memory once
+per column); `GGML_LOD_SPLIT=mega` selects a single persistent mega-kernel (all four
+stages in one launch, software grid barriers between phases; wave64, P<=2048).
+Both measured slower than the default pipeline in every regime (incl. 100k-scale
+geometry) and are kept for ablation. `LLAMA_LOD_FUSED=0` selects the composed-op
+read; `LLAMA_LOD_SEL=head` selects per-KV-head page sets. The micro-harness
+(`LOD_BENCH=1 test-lod-attention`, with `LOD_BENCH_TOP` / `LOD_BENCH_P`) measures the
+fused op at arbitrary budget/page-count geometry.
 
 ## Measured results (MI325X, single GPU, `-ub 2048`, top_pages 32)
 

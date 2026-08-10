@@ -202,6 +202,12 @@ public:
     // full-capacity page-sum rows [D, P_cap*Hkv] (row = p + P_cap*kv), for set_rows scatter
     ggml_tensor * get_k_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const;
     ggml_tensor * get_v_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    // page means: token-shaped view [D, n_pages, Hkv] and set_rows row view [D*Hkv, n_pages]
+    ggml_tensor * get_k_means(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_v_means(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_k_meanrows(ggml_context * ctx, int32_t il, uint32_t n, uint32_t strm) const;
+    ggml_tensor * get_v_meanrows(ggml_context * ctx, int32_t il, uint32_t n, uint32_t strm) const;
+    bool has_lod_means() const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     ggml_tensor * cpy_k(ggml_context * ctx, ggml_tensor * k_cur, ggml_tensor * k_idxs, int32_t il, const slot_info & sinfo) const;
@@ -264,6 +270,10 @@ private:
         // LoD page sums, F32 [n_embd_head, n_pages, n_head_kv], null when LoD is off
         ggml_tensor * k_page = nullptr;
         ggml_tensor * v_page = nullptr;
+
+        // LoD page means in cache precision (mask-direct prefill), null when off
+        ggml_tensor * k_mean = nullptr;
+        ggml_tensor * v_mean = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
@@ -428,6 +438,11 @@ public:
     ggml_tensor * get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const;
     ggml_tensor * get_k_page_sumrows(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v_page_sumrows(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_means(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_v_means(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_k_meanrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    ggml_tensor * get_v_meanrows(ggml_context * ctx, int32_t il, uint32_t n) const;
+    bool has_lod_means() const;
 
     // store k_cur and v_cur in the cache based on the provided head location
     // note: the heads in k_cur and v_cur should be laid out contiguously in memory

@@ -14,6 +14,7 @@
 
 #include <cinttypes>
 #include <cmath>
+#include <algorithm>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -250,7 +251,62 @@ llama_context::llama_context(
     // env: LLAMA_LOD, LLAMA_LOD_PAGE_SIZE, LLAMA_LOD_TOP_PAGES, LLAMA_LOD_SEL (head|layer)
     cparams.lod           = getenv("LLAMA_LOD") != nullptr;
     cparams.lod_page_size = getenv("LLAMA_LOD_PAGE_SIZE") ? atoi(getenv("LLAMA_LOD_PAGE_SIZE")) : 64;
-    cparams.lod_top_pages = getenv("LLAMA_LOD_TOP_PAGES") ? atoi(getenv("LLAMA_LOD_TOP_PAGES")) : 32;
+    // per-layer budget spec: "DEF[,il=V | l0-l1=V ...]" where a value V is
+    // "PAGES", "PAGES:REGIONS" or "dense" (that layer reads plain dense attention).
+    // example: "64:32,5=192:64,11=dense,20-30=128"
+    {
+        const uint32_t n_layer = model.hparams.n_layer();
+        const char * spec = getenv("LLAMA_LOD_TOP_PAGES");
+
+        auto parse_val = [](const char * v, uint32_t & pages, uint32_t & regions) {
+            if (strncmp(v, "dense", 5) == 0) {
+                pages = 0; // dense escape sentinel
+                return;
+            }
+            pages = std::max(1, atoi(v));
+            const char * col = strchr(v, ':');
+            const char * end = strchr(v, ',');
+            if (col != nullptr && (end == nullptr || col < end)) {
+                regions = std::max(1, atoi(col + 1));
+            }
+        };
+
+        uint32_t def_p = 32, def_r = 64;
+        if (spec) {
+            parse_val(spec, def_p, def_r);
+        }
+        cparams.lod_top_pages_l.assign(n_layer, def_p);
+        cparams.lod_top_regions_l.assign(n_layer, def_r);
+
+        if (spec) {
+            const char * c = strchr(spec, ',');
+            while (c != nullptr) {
+                c++;
+                uint32_t l0 = atoi(c);
+                uint32_t l1 = l0;
+                const char * d = strchr(c, '-');
+                const char * e = strchr(c, '=');
+                if (e == nullptr) {
+                    break;
+                }
+                if (d != nullptr && d < e) {
+                    l1 = atoi(d + 1);
+                }
+                uint32_t vp = def_p, vr = def_r;
+                parse_val(e + 1, vp, vr);
+                for (uint32_t il = l0; il <= l1 && il < n_layer; ++il) {
+                    cparams.lod_top_pages_l[il]   = vp;
+                    cparams.lod_top_regions_l[il] = vr;
+                }
+                c = strchr(e, ',');
+            }
+        }
+
+        cparams.lod_top_pages = *std::max_element(cparams.lod_top_pages_l.begin(), cparams.lod_top_pages_l.end());
+        if (cparams.lod_top_pages == 0) {
+            cparams.lod_top_pages = 1; // all-dense spec: keep gates sane
+        }
+    }
     // default: one page set per layer - per-KV-head selection reads x n_head_kv more data
     // for a second-order quality gain (opt in with LLAMA_LOD_SEL=head)
     cparams.lod_sel_head  = getenv("LLAMA_LOD_SEL") && strcmp(getenv("LLAMA_LOD_SEL"), "head") == 0;

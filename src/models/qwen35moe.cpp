@@ -352,7 +352,7 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn(
     // Attention computation
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
-    if (inp_lod) {
+    if (inp_lod && cparams.lod_top_pages_l[il] > 0) {
         cur = build_attn(inp_lod,
                     nullptr, nullptr, nullptr,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);

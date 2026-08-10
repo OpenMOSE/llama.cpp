@@ -260,6 +260,8 @@ llama_kv_cache::llama_kv_cache(
 
         ggml_tensor * k_page = nullptr;
         ggml_tensor * v_page = nullptr;
+        ggml_tensor * k_mean = nullptr;
+        ggml_tensor * v_mean = nullptr;
 
         if (lod_page_size > 0) {
             const uint32_t n_pages = kv_size / lod_page_size;
@@ -269,11 +271,24 @@ llama_kv_cache::llama_kv_cache(
 
             ggml_format_name(k_page, "cache_k_page_l%d", il);
             ggml_format_name(v_page, "cache_v_page_l%d", il);
+
+            // page means in cache precision: the mask-direct prefill reads them as
+            // extra fattn columns. Quantized caches qualify when the head dim has
+            // quantized flash-attention kernels (vec cases go up to D=256)
+            const bool quant_kv = ggml_is_quantized(type_k) || ggml_is_quantized(type_v);
+            if (!quant_kv || (hparams.n_embd_head_k(il) <= 256 && hparams.n_embd_head_v(il) <= 256)) {
+                // +256 zeroed rows double as flash-attention padding columns
+                k_mean = ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, n_pages + 256, n_stream);
+                v_mean = ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, n_pages + 256, n_stream);
+
+                ggml_format_name(k_mean, "cache_k_mean_l%d", il);
+                ggml_format_name(v_mean, "cache_v_mean_l%d", il);
+            }
         }
 
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, k_page, v_page, });
+        layers.push_back({ il, k, v, k_stream, v_stream, k_page, v_page, k_mean, v_mean, });
     }
 
     if (reuse) {
@@ -1480,6 +1495,38 @@ ggml_tensor * llama_kv_cache::get_k_page_sums(ggml_context * ctx, int32_t il, ui
     GGML_ASSERT(kp != nullptr);
 
     return ggml_view_3d(ctx, kp, kp->ne[0], np, kp->ne[2], kp->nb[1], kp->nb[2], p0*kp->nb[1] + strm*kp->nb[3]);
+}
+
+
+ggml_tensor * llama_kv_cache::get_k_means(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].k_mean;
+    GGML_ASSERT(t != nullptr);
+    // [n_embd_gqa, n_pages] rows -> token-shaped [D, n_pages, Hkv]
+    const int64_t D = hparams.n_embd_head_k(layers[map_layer_ids.at(il)].il);
+    return ggml_view_3d(ctx, t, D, t->ne[1], t->ne[0]/D, t->nb[1], (size_t) D*ggml_element_size(t), strm*t->nb[2]);
+}
+
+ggml_tensor * llama_kv_cache::get_v_means(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].v_mean;
+    GGML_ASSERT(t != nullptr);
+    const int64_t D = hparams.n_embd_head_v(layers[map_layer_ids.at(il)].il);
+    return ggml_view_3d(ctx, t, D, t->ne[1], t->ne[0]/D, t->nb[1], (size_t) D*ggml_element_size(t), strm*t->nb[2]);
+}
+
+ggml_tensor * llama_kv_cache::get_k_meanrows(ggml_context * ctx, int32_t il, uint32_t n, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].k_mean;
+    GGML_ASSERT(t != nullptr && (int64_t) n <= t->ne[1]);
+    return ggml_view_2d(ctx, t, t->ne[0], n, t->nb[1], strm*t->nb[2]);
+}
+
+ggml_tensor * llama_kv_cache::get_v_meanrows(ggml_context * ctx, int32_t il, uint32_t n, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].v_mean;
+    GGML_ASSERT(t != nullptr && (int64_t) n <= t->ne[1]);
+    return ggml_view_2d(ctx, t, t->ne[0], n, t->nb[1], strm*t->nb[2]);
+}
+
+bool llama_kv_cache::has_lod_means() const {
+    return !layers.empty() && layers[0].k_mean != nullptr;
 }
 
 ggml_tensor * llama_kv_cache::get_k_page_sumrows(ggml_context * ctx, int32_t il, uint32_t strm) const {
@@ -2871,6 +2918,27 @@ ggml_tensor * llama_kv_cache_context::get_k_page_sums(ggml_context * ctx, int32_
 
 ggml_tensor * llama_kv_cache_context::get_v_page_sums(ggml_context * ctx, int32_t il, uint32_t p0, uint32_t np) const {
     return kv->get_v_page_sums(ctx, il, p0, np, get_stream());
+}
+
+
+ggml_tensor * llama_kv_cache_context::get_k_means(ggml_context * ctx, int32_t il) const {
+    return kv->get_k_means(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_means(ggml_context * ctx, int32_t il) const {
+    return kv->get_v_means(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_k_meanrows(ggml_context * ctx, int32_t il, uint32_t n) const {
+    return kv->get_k_meanrows(ctx, il, n, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_v_meanrows(ggml_context * ctx, int32_t il, uint32_t n) const {
+    return kv->get_v_meanrows(ctx, il, n, get_stream());
+}
+
+bool llama_kv_cache_context::has_lod_means() const {
+    return kv->has_lod_means();
 }
 
 ggml_tensor * llama_kv_cache_context::get_k_page_sumrows(ggml_context * ctx, int32_t il) const {

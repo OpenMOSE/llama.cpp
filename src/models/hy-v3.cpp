@@ -154,7 +154,7 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
                     n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                     ext_factor, attn_factor, beta_fast, beta_slow);
 
-            if (inp_lod) {
+            if (inp_lod && cparams.lod_top_pages_l[il] > 0) {
                 cur = build_attn(inp_lod,
                         model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
                         Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);

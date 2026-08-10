@@ -244,7 +244,7 @@ llama_model_gemma4::graph::graph(const llama_model & model, const llm_graph_para
 
             cb(Kcur, "Kcur_pos", il);
 
-            if (inp_lod && !hparams.is_swa(il)) {
+            if (inp_lod && !hparams.is_swa(il) && cparams.lod_top_pages_l[il] > 0) {
                 cur = build_attn(inp_lod, model.layers[il].wo,
                         nullptr, model.layers[il].wo_s, Qcur, Kcur, Vcur, nullptr, nullptr, nullptr,
                         hparams.f_attention_scale, il);

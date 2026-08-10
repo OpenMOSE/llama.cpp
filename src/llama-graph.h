@@ -423,6 +423,7 @@ public:
     ggml_tensor * lod_arange = nullptr; // I32 [n_exact_pad] = tail_start+i, for quantized-cache dequant reads
     ggml_tensor * lod_catchup = nullptr; // I32 [catchup_len] = sums_pos+i, lazy page-sum rebuild after dense-path ubatches
     ggml_tensor * lod_pmeta   = nullptr; // F32 [1] = runtime complete pages (static prefill graphs)
+    ggml_tensor * lod_meanidx = nullptr; // I32 [P_cap] = 0..P_cap-1, mean-row refresh scatter ids
     ggml_tensor * lod_pageidx = nullptr; // I32 [n_full*Hkv] page-sum row ids for the fold scatter
 
     // which memory type wraps the LoD base cache (needed to re-resolve mctx on graph reuse)
@@ -434,6 +435,18 @@ public:
     uint32_t catchup_p0 = 0, catchup_len = 0;
     uint32_t P_cap = 0, n_full = 0; // static-prefill geometry (stat_fa)
     bool     stat_fa = false;       // capacity-padded FA graph, reusable across ubatches
+
+    // mask parts are layer-independent: built once per graph by the first LoD layer
+    ggml_tensor * sh_band  = nullptr; // [n_exact_pad, n_tokens] causal band (0 / -inf)
+    ggml_tensor * sh_leaf  = nullptr; // [NL, n_tokens] zeros
+    ggml_tensor * sh_logv  = nullptr; // [Pv] page-validity (0 / -inf), stat_fa only
+    ggml_tensor * sh_mpre  = nullptr; // [NL + n_exact_pad, n_tokens] = concat(leaf, band)
+
+    // mask-direct branch: layer-independent pieces built once per graph
+    ggml_tensor * sh_mbase = nullptr; // [S, n_tokens] causal base
+    ggml_tensor * sh_mkill = nullptr; // [P_span] page-kill column
+    ggml_tensor * sh_mlogv = nullptr; // [P_cap] page validity
+    uint32_t      mask_S   = 0;       // span the mask graph was built for
 
     const llama_hparams hparams;
     const llama_cparams cparams;

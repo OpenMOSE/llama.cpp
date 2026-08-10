@@ -54,7 +54,9 @@ struct llama_cparams {
     bool     lod_sel_head;   // top-k page set per KV head (else one set per layer)
     bool     lod_fused;      // use the fused GGML_OP_LOD_ATTN read for decode
     uint32_t lod_page_size;
-    uint32_t lod_top_pages;
+    uint32_t lod_top_pages;                 // max over layers (gates, reuse checks)
+    std::vector<uint32_t> lod_top_pages_l;   // per-layer leaf budgets; 0 = dense escape
+    std::vector<uint32_t> lod_top_regions_l; // per-layer region budgets (selection tier)
 
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;

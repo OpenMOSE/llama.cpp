@@ -1,3 +1,6 @@
+#define GGML_COMMON_DECL_CPP
+#include "ggml-common.h"
+
 #include "ops.h"
 
 #include "ggml-cpu.h"
@@ -11965,10 +11968,14 @@ void ggml_compute_forward_lod_attn(
                 const char * kc = (const char *) k->data + col*k->nb[1] + hh*k->nb[2];
                 const char * vc = (const char *) v->data + col*v->nb[1] + hh*v->nb[2];
                 for (int64_t d = 0; d < Dk; ++d) {
-                    ksd[d] += k->type == GGML_TYPE_F16 ? GGML_FP16_TO_FP32(((const ggml_fp16_t *) kc)[d]) : ((const float *) kc)[d];
+                    ksd[d] += k->type == GGML_TYPE_Q8_0 ?
+                        GGML_FP16_TO_FP32(((const block_q8_0 *) kc)[d/QK8_0].d)*((const block_q8_0 *) kc)[d/QK8_0].qs[d%QK8_0] :
+                        k->type == GGML_TYPE_F16 ? GGML_FP16_TO_FP32(((const ggml_fp16_t *) kc)[d]) : ((const float *) kc)[d];
                 }
                 for (int64_t d = 0; d < Dv; ++d) {
-                    vsd[d] += v->type == GGML_TYPE_F16 ? GGML_FP16_TO_FP32(((const ggml_fp16_t *) vc)[d]) : ((const float *) vc)[d];
+                    vsd[d] += v->type == GGML_TYPE_Q8_0 ?
+                        GGML_FP16_TO_FP32(((const block_q8_0 *) vc)[d/QK8_0].d)*((const block_q8_0 *) vc)[d/QK8_0].qs[d%QK8_0] :
+                        v->type == GGML_TYPE_F16 ? GGML_FP16_TO_FP32(((const ggml_fp16_t *) vc)[d]) : ((const float *) vc)[d];
                 }
             }
         }
@@ -12025,14 +12032,14 @@ void ggml_compute_forward_lod_attn(
     const float inv_ps  = 1.0f/ps;
 
     GGML_ASSERT(Dv <= 1024);
-    GGML_ASSERT(k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16);
-    GGML_ASSERT(v->type == GGML_TYPE_F32 || v->type == GGML_TYPE_F16);
+    GGML_ASSERT(k->type == GGML_TYPE_F32 || k->type == GGML_TYPE_F16 || (k->type == GGML_TYPE_Q8_0 && Dk%QK8_0 == 0));
+    GGML_ASSERT(v->type == GGML_TYPE_F32 || v->type == GGML_TYPE_F16 || (v->type == GGML_TYPE_Q8_0 && Dv%QK8_0 == 0));
 
     const int32_t * sel_d    = sel ? (const int32_t *) sel->data : (const int32_t *) params->wdata;
     const bool      sel_rows = sel == NULL && ggml_get_op_params_i32(dst, 3) != 0;
 
-    const bool k_f16 = k->type == GGML_TYPE_F16;
-    const bool v_f16 = v->type == GGML_TYPE_F16;
+    const int k_tc = k->type == GGML_TYPE_Q8_0 ? 2 : k->type == GGML_TYPE_F16 ? 1 : 0;
+    const int v_tc = v->type == GGML_TYPE_Q8_0 ? 2 : v->type == GGML_TYPE_F16 ? 1 : 0;
 
     const int64_t n_rows = nq*Hq;
 
@@ -12052,7 +12059,7 @@ void ggml_compute_forward_lod_attn(
         float acc[1024] = { 0.0f };
 
         // one streaming softmax term: logit + value pointer (+ value scale)
-        auto add_term = [&](float logit, const char * vptr, bool vf16, float vscale) {
+        auto add_term = [&](float logit, const char * vptr, int vtc, float vscale) {
             float w;
             if (logit > m) {
                 const float e = expf(m - logit);
@@ -12066,7 +12073,12 @@ void ggml_compute_forward_lod_attn(
                 w = expf(logit - m);
             }
             den += w;
-            if (vf16) {
+            if (vtc == 2) {
+                const block_q8_0 * vp = (const block_q8_0 *) vptr;
+                for (int64_t d = 0; d < Dv; ++d) {
+                    acc[d] += w*vscale*GGML_FP16_TO_FP32(vp[d/QK8_0].d)*vp[d/QK8_0].qs[d%QK8_0];
+                }
+            } else if (vtc) {
                 const ggml_fp16_t * vp = (const ggml_fp16_t *) vptr;
                 for (int64_t d = 0; d < Dv; ++d) {
                     acc[d] += w*vscale*GGML_FP16_TO_FP32(vp[d]);
@@ -12079,9 +12091,14 @@ void ggml_compute_forward_lod_attn(
             }
         };
 
-        auto dot_k = [&](const char * kptr, bool kf16) {
+        auto dot_k = [&](const char * kptr, int ktc) {
             float s = 0.0f;
-            if (kf16) {
+            if (ktc == 2) {
+                const block_q8_0 * kp = (const block_q8_0 *) kptr;
+                for (int64_t d = 0; d < Dk; ++d) {
+                    s += qp[d]*GGML_FP16_TO_FP32(kp[d/QK8_0].d)*kp[d/QK8_0].qs[d%QK8_0];
+                }
+            } else if (ktc) {
                 const ggml_fp16_t * kp = (const ggml_fp16_t *) kptr;
                 for (int64_t d = 0; d < Dk; ++d) {
                     s += qp[d]*GGML_FP16_TO_FP32(kp[d]);
@@ -12112,7 +12129,7 @@ void ggml_compute_forward_lod_attn(
             for (int64_t d = 0; d < Dk; ++d) {
                 s += qp[d]*ksp[d];
             }
-            add_term(s*inv_ps*scale + logn, (const char *) vs->data + p*vs->nb[1] + hk*vs->nb[2], false, inv_ps);
+            add_term(s*inv_ps*scale + logn, (const char *) vs->data + p*vs->nb[1] + hk*vs->nb[2], 0, inv_ps);
         }
 
         // tier 2: leaves of the selected pages, read exactly from the cache
@@ -12124,14 +12141,14 @@ void ggml_compute_forward_lod_attn(
             for (int64_t j = 0; j < ps; ++j) {
                 const int64_t col = p*ps + j;
                 const char * kp = (const char *) k->data + col*k->nb[1] + hk*k->nb[2];
-                add_term(dot_k(kp, k_f16)*scale, (const char *) v->data + col*v->nb[1] + hk*v->nb[2], v_f16, 1.0f);
+                add_term(dot_k(kp, k_tc)*scale, (const char *) v->data + col*v->nb[1] + hk*v->nb[2], v_tc, 1.0f);
             }
         }
 
         // tier 3: raw tail plus the current tokens, causal
         for (int64_t col = tail0; col <= limit; ++col) {
             const char * kp = (const char *) k->data + col*k->nb[1] + hk*k->nb[2];
-            add_term(dot_k(kp, k_f16)*scale, (const char *) v->data + col*v->nb[1] + hk*v->nb[2], v_f16, 1.0f);
+            add_term(dot_k(kp, k_tc)*scale, (const char *) v->data + col*v->nb[1] + hk*v->nb[2], v_tc, 1.0f);
         }
 
         float * out = (float *)((char *) dst->data + h*dst->nb[1] + qi*dst->nb[2]);

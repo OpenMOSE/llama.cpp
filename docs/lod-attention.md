@@ -15,7 +15,8 @@ exactly there. Every *unselected* page still contributes its count-weighted mean
 exactly. The most recent tokens (the partial page plus the current ubatch) are always read
 exactly ("tail"). Reference: `/home/mose/Projects/RWKVInside4/docs/lod1_spec.md` (LoD1;
 this port implements the all-pages branch, i.e. no region tier, valid to ~64k of context
-at the default settings).
+at the default settings). The full algorithm-level specification of this port - written
+for independent (e.g. PyTorch) re-implementation - is in `lod-attention-spec.md`.
 
 ## Usage
 

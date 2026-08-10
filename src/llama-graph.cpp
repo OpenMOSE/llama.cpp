@@ -3347,7 +3347,9 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
 
     // the mask is generated on-device in build_attn (regular structure, no upload)
 
-    if ((n_tokens > 1 && !use_fused_pre) || inp->catchup_len > 0) {
+    // catchup_len == 1 folds through the single-token shortcut which does not read
+    // lod_ones - creating it would leave an unconsumed input without a buffer
+    if ((n_tokens > 1 && !use_fused_pre) || inp->catchup_len > 1) {
         // the fused op folds the sums itself; single-token updates reduce to a plain add
         inp->lod_ones = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, ps);
         ggml_set_input(inp->lod_ones);

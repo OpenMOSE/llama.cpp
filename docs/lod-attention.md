@@ -29,9 +29,11 @@ Underlying env vars (usable directly): `LLAMA_LOD=1`, `LLAMA_LOD_TOP_PAGES`,
 `LLAMA_LOD_PAGE_SIZE`, `LLAMA_LOD_SEL`, `LLAMA_LOD_FUSED=1` (fused decode kernel; `--lod`
 turns it on by default).
 
-Supported models: **gemma4** (LoD on the non-SWA layers; SWA layers untouched),
-**qwen35 / qwen3.6** and **qwen35moe** (LoD on the full-attention layers; the GDN
-linear layers untouched). Any other model runs unmodified even with `--lod` set.
+Supported models: **gemma4** and **step35** (LoD on the non-SWA layers; SWA layers
+untouched), **qwen35 / qwen3.6** and **qwen35moe** (LoD on the full-attention layers;
+the GDN linear layers untouched), and **hy-v3** (every layer is full attention - the
+model class where LoD decode also wins at depth). Any other model runs unmodified even
+with `--lod` set.
 
 `llama-server` note: LoD needs per-sequence KV streams. With `-np` unset the server
 would auto-enable the unified cache, which silently falls back to the dense read on

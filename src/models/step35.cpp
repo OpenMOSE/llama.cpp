@@ -1,4 +1,5 @@
 #include "models.h"
+#include "llama-kv-cache-iswa.h"
 
 void llama_model_step35::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
@@ -199,6 +200,14 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
     inpL = build_inp_embd(model.tok_embd);
     ggml_tensor * inp_pos     = build_inp_pos();
     auto        * inp_attn    = build_attn_inp_kv_iswa();
+
+    // LoD sparse read for the full-attention (non-SWA) layers
+    llm_graph_input_attn_lod * inp_lod = nullptr;
+    if (cparams.lod) {
+        const auto * mctx_iswa = static_cast<const llama_kv_cache_iswa_context *>(mctx);
+        inp_lod = build_attn_inp_lod(mctx_iswa->get_base(), llm_graph_input_attn_lod::LOD_PARENT_ISWA);
+    }
+
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     // MTP/NextN layers are loaded as extra decoder blocks but not executed in the main pass.
@@ -260,9 +269,16 @@ llama_model_step35::graph::graph(const llama_model & model, const llm_graph_para
             cb(Kcur, "Kcur_pos", il);
 
             const float kq_scale = 1.0f / sqrtf(float(n_embd_head_k));
-            ggml_tensor * attn_out = build_attn(inp_attn,
-                    nullptr, nullptr, nullptr,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            ggml_tensor * attn_out;
+            if (inp_lod && !is_swa) {
+                attn_out = build_attn(inp_lod,
+                        nullptr, nullptr, nullptr,
+                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            } else {
+                attn_out = build_attn(inp_attn,
+                        nullptr, nullptr, nullptr,
+                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            }
             cb(attn_out, "attn_out", il);
             // head-wise attention gate: sigmoid(g_proj(x)) in torch
             if (model.layers[il].wqkv_gate) {

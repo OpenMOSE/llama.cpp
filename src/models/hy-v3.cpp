@@ -1,4 +1,5 @@
 #include "models.h"
+#include "llama-kv-cache.h"
 
 void llama_model_hy_v3::load_arch_hparams(llama_model_loader & ml) {
     ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS,       hparams.f_norm_rms_eps);
@@ -119,6 +120,13 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
     inpL = build_inp_embd(model.tok_embd);
     ggml_tensor * inp_pos = build_inp_pos();
     auto * inp_attn = build_attn_inp_kv();
+
+    // LoD sparse read - every layer is full attention
+    llm_graph_input_attn_lod * inp_lod = nullptr;
+    if (cparams.lod) {
+        inp_lod = build_attn_inp_lod(static_cast<const llama_kv_cache_context *>(mctx), llm_graph_input_attn_lod::LOD_PARENT_PLAIN);
+    }
+
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
     const float kq_scale = 1.0f / sqrtf(float(n_embd_head));
@@ -146,9 +154,15 @@ llama_model_hy_v3::graph::graph(const llama_model & model, const llm_graph_param
                     n_rot, rope_type, n_ctx_orig, freq_base, freq_scale,
                     ext_factor, attn_factor, beta_fast, beta_slow);
 
-            cur = build_attn(inp_attn,
-                    model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
-                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            if (inp_lod) {
+                cur = build_attn(inp_lod,
+                        model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
+                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            } else {
+                cur = build_attn(inp_attn,
+                        model.layers[il].wo, model.layers[il].wo_b, model.layers[il].wo_s,
+                        Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+            }
             cb(cur, "attn_out", il);
         }
 

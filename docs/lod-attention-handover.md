@@ -27,7 +27,9 @@ Everything below is uncommitted work on branch `lod`.
   prompt-cache reuse AND after MTP rollbacks (folds are read-modify-write; a
   bare watermark rewind double-counts).
 - Multi-slot server (-np N, per-stream sums, dense fallback for mixed batches),
-  MTP (gemma assistant gguf + qwen3.6 built-in), quantized KV via composed path.
+  MTP (gemma assistant gguf + qwen3.6 built-in). q8_0 KV runs the full fast paths
+  (in-kernel dequant in the fused decode kernel, static-graph FA prefill, mask
+  prefill on the raw q8_0 cache); other quantized types use the composed path.
 - Wired models: gemma4, step35 (iSWA), qwen35, qwen35moe (hybrid), hy-v3
   (pure full attention). step35/hy-v3 compile-validated only (no ggufs here).
 - Server traps fixed: auto kv_unified (would silently disable LoD; now kept off

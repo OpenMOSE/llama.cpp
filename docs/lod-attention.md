@@ -49,8 +49,10 @@ per-ubatch cost for selection and KV assembly, and at `-ub 512` that cost domina
 measured at depth 64k: LoD 708 t/s at `-ub 512` vs 2546 t/s at `-ub 2048` (dense at
 `-ub 512`: 911 t/s).
 
-Works with `-fa on` (recommended), with quantized KV (`-ctk q8_0 -ctv q8_0` etc. - leaves
-and the exact tail are read through dequantizing gathers), and with MTP speculative
+Works with `-fa on` (recommended), with quantized KV (`-ctk q8_0 -ctv q8_0` runs the full
+fast paths: the fused decode kernel dequantizes q8_0 blocks in-kernel, prefill uses the
+static flash-attention graphs, and the mask-direct prefill reads q8_0 caches directly;
+other quantized types fall back to dequantizing gathers), and with MTP speculative
 decoding (`--spec-type draft-mtp`).
 
 ### Restrictions
@@ -158,8 +160,8 @@ against these.
   ~31 t/s at top128 at depth 100k)
 - region tier (restores selection precision at low budgets for >64k contexts) not
   implemented - the highest-priority next step
-- fused kernel is F16-only (quantized decode uses the composed fallback); q8_0 in-kernel
-  dequant is designed but not implemented
+- fused kernel reads F32/F16/q8_0 caches natively; other quantized types use the
+  composed fallback
 - parallel sequences and multi-GPU input broadcast optimization not implemented
 - selection is shared per layer (or per KV head with `--lod-sel head`, at x n_head_kv
   gather cost); per-query selection as in the LoD1 spec is future work

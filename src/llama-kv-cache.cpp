@@ -273,10 +273,11 @@ llama_kv_cache::llama_kv_cache(
             ggml_format_name(v_page, "cache_v_page_l%d", il);
 
             // page means in cache precision: the mask-direct prefill reads them as
-            // extra fattn columns. Quantized caches qualify when the head dim has
-            // quantized flash-attention kernels (vec cases go up to D=256)
-            const bool quant_kv = ggml_is_quantized(type_k) || ggml_is_quantized(type_v);
-            if (!quant_kv || (hparams.n_embd_head_k(il) <= 256 && hparams.n_embd_head_v(il) <= 256)) {
+            // extra fattn columns. q8_0 caches qualify at any head dim - the batch
+            // fattn kernels read quantized K/V through their internal F16 conversion
+            const bool quant_ok = (!ggml_is_quantized(type_k) || type_k == GGML_TYPE_Q8_0) &&
+                                  (!ggml_is_quantized(type_v) || type_v == GGML_TYPE_Q8_0);
+            if (quant_ok) {
                 // +256 zeroed rows double as flash-attention padding columns
                 k_mean = ggml_new_tensor_3d(ctx, type_k, n_embd_k_gqa, n_pages + 256, n_stream);
                 v_mean = ggml_new_tensor_3d(ctx, type_v, n_embd_v_gqa, n_pages + 256, n_stream);

@@ -1645,6 +1645,19 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--lod-prefill"}, "MODE",
+        "LoD: prompt-processing mode. 'mask' selects pages per 32-query block and is what\n"
+        "makes multi-key retrieval hold up in long contexts; 'gather' shares one page set\n"
+        "across the whole ubatch and processes prompts faster (default: mask)",
+        [](common_params & params, const std::string & value) {
+            if (value != "mask" && value != "gather") {
+                throw std::invalid_argument("--lod-prefill must be 'mask' or 'gather'");
+            }
+            setenv("LLAMA_LOD_PREFILL", value.c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
         {"--lod-sel"}, "MODE",
         "LoD: top-k page selection granularity: layer (default) or head",
         [](common_params & params, const std::string & value) {

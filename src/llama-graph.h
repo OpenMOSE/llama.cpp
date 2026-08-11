@@ -432,6 +432,11 @@ public:
 
     // ubatch geometry, fixed at graph build (prev_end advances on reuse)
     uint32_t ps = 0, prev_end = 0, tail_start = 0, n_exact_pad = 0, P_full = 0, kP = 0, NL = 0;
+    // KV stream the graph was built against: unlike the dense path, which addresses
+    // the cache through index inputs, the LoD read bakes stream byte offsets into its
+    // views (cache rows, page sums, mean rows), so a graph is only reusable for the
+    // same stream. With several server slots the scheduler switches streams freely.
+    uint32_t strm = 0;
     uint32_t catchup_p0 = 0, catchup_len = 0;
     uint32_t P_cap = 0, n_full = 0; // static-prefill geometry (stat_fa)
     bool     stat_fa = false;       // capacity-padded FA graph, reusable across ubatches

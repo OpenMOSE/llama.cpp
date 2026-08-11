@@ -473,6 +473,94 @@ void llama_kv_cache::lod_truncate_sums(uint32_t p0, uint32_t strm) {
     lod_sums_pos[strm] = p_lo*lod_page_size; // the partial page refolds from scratch
 }
 
+// self-test for the checker below: scribble on one page sum so a healthy run must report it
+void llama_kv_cache::lod_corrupt_one_page(uint32_t strm) {
+    if (lod_page_size == 0 || layers.empty() || layers[0].k_page == nullptr) {
+        return;
+    }
+    const std::vector<float> junk(hparams.n_embd_head_k(layers[0].il), 12345.0f);
+    ggml_backend_tensor_set(layers[0].k_page, junk.data(), strm*layers[0].k_page->nb[3], junk.size()*sizeof(float));
+}
+
+// debug helper: the page sums are maintained incrementally (read-modify-write folds,
+// page-floor rewinds, lazy catch-up). Any path that edits the cells without telling the
+// LoD bookkeeping leaves them describing tokens that are no longer there, which shows up
+// as garbled generation long after the fact. This recomputes them from the cells.
+void llama_kv_cache::lod_check_sums(uint32_t strm, uint32_t n_past, const char * where) const {
+    if (lod_page_size == 0 || layers.empty()) {
+        return;
+    }
+
+    const uint32_t n_pages = n_past/lod_page_size;
+    if (n_pages == 0) {
+        return;
+    }
+
+    int n_bad = 0;
+
+    for (const auto & layer : layers) {
+        if (layer.k_page == nullptr) {
+            continue;
+        }
+
+        const uint32_t D   = hparams.n_embd_head_k(layer.il);
+        const uint32_t Hkv = hparams.n_head_kv(layer.il);
+
+        std::vector<float> got(ggml_nelements(layer.k_page)/layer.k_page->ne[3]);
+        ggml_backend_tensor_get(layer.k_page, got.data(), strm*layer.k_page->nb[3], got.size()*sizeof(float));
+
+        // the cells of this stream, in cache row layout [n_embd_k_gqa, kv_size]
+        const size_t row_sz = ggml_row_size(layer.k->type, D*Hkv);
+        std::vector<uint8_t> rows(row_sz*(size_t) n_pages*lod_page_size);
+        ggml_backend_tensor_get(layer.k, rows.data(), strm*layer.k->nb[2], rows.size());
+
+        const auto * tt = ggml_get_type_traits(layer.k->type);
+
+        std::vector<float> deq(D*Hkv);
+        std::vector<float> ref(D*Hkv);
+
+        for (uint32_t p = 0; p < n_pages; ++p) {
+            std::fill(ref.begin(), ref.end(), 0.0f);
+
+            for (uint32_t t = 0; t < lod_page_size; ++t) {
+                const uint8_t * src = rows.data() + row_sz*((size_t) p*lod_page_size + t);
+                if (layer.k->type == GGML_TYPE_F32) {
+                    memcpy(deq.data(), src, D*Hkv*sizeof(float));
+                } else {
+                    tt->to_float(src, deq.data(), D*Hkv);
+                }
+                for (uint32_t i = 0; i < D*Hkv; ++i) {
+                    ref[i] += deq[i];
+                }
+            }
+
+            for (uint32_t h = 0; h < Hkv; ++h) {
+                for (uint32_t d = 0; d < D; ++d) {
+                    // k_page is [D, n_pages, Hkv]; the cache row is [D, Hkv] interleaved
+                    const float a = got[d + D*(p + (size_t) h*layer.k_page->ne[1])];
+                    const float b = ref[d + D*h];
+                    const float tol = 1e-2f*std::max(1.0f, fabsf(b));
+                    if (fabsf(a - b) > tol) {
+                        if (n_bad < 4) {
+                            LLAMA_LOG_ERROR("%s: LoD page sums CORRUPT at %s: layer %d page %u head %u dim %u: "
+                                    "maintained %.4f vs recomputed %.4f (n_past = %u, sums_pos = %u)\n",
+                                    __func__, where, layer.il, p, h, d, a, b, n_past, lod_sums_pos[strm]);
+                        }
+                        n_bad++;
+                        d = D; h = Hkv; // one report per page is enough
+                    }
+                }
+            }
+        }
+    }
+
+    if (n_bad == 0) {
+        LLAMA_LOG_WARN("%s: LoD page sums verified at %s (%u pages, n_past = %u)\n", __func__, where, n_pages, n_past);
+    } else {
+        LLAMA_LOG_ERROR("%s: LoD page sums CORRUPT at %s: %d bad pages\n", __func__, where, n_bad);
+    }
+}
+
 bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
     // TODO: refactor [TAG_KV_CACHE_SHARE_CELLS]
     if (other) {
@@ -2334,6 +2422,18 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
             }
             throw std::runtime_error("failed to restore kv cache");
         }
+
+        // the folded page sums are derived state and are not part of the serialized
+        // sequence - restoring cells underneath them would leave summaries describing
+        // tokens that are no longer in the cache. Drop them and let the lazy catch-up
+        // refold from the restored cells on the next graph.
+        if (lod_page_size > 0) {
+            LLAMA_LOG_WARN("%s: LoD page sums dropped for stream %u after a state restore "
+                    "(%u cells); they will be refolded lazily\n", __func__, strm, cell_count);
+
+            lod_zero_sums(0, UINT32_MAX, strm);
+            lod_sums_pos[strm] = 0;
+        }
     }
 }
 
@@ -2883,6 +2983,14 @@ uint32_t llama_kv_cache_context::get_stream() const {
 
 uint32_t llama_kv_cache_context::get_lod_sums_pos() const {
     return kv->get_lod_sums_pos(get_stream());
+}
+
+void llama_kv_cache_context::lod_check_sums(uint32_t n_past, const char * where) const {
+    kv->lod_check_sums(get_stream(), n_past, where);
+}
+
+void llama_kv_cache_context::lod_corrupt_one_page() const {
+    const_cast<llama_kv_cache *>((const llama_kv_cache *) kv)->lod_corrupt_one_page(get_stream());
 }
 
 void llama_kv_cache_context::lod_note_sums(uint32_t pos) const {

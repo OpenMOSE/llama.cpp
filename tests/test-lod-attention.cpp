@@ -550,69 +550,84 @@ static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_
         selh[i] = (int32_t) sc[i].second;
     }
 
-    ggml_init_params ip = { ggml_tensor_overhead()*64 + ggml_graph_overhead()*2, NULL, true };
-    ggml_context * ctx = ggml_init(ip);
+    // the in-op and explicit-selection graphs share the read kernel, so their agreement
+    // only proves the selection stage. The CPU implementation is an independent
+    // reference for the read itself - every accelerator result is checked against it.
+    auto exec_on = [&](ggml_backend_t be, std::vector<float> & ya, std::vector<float> & yb) {
+        ggml_init_params ip = { ggml_tensor_overhead()*64 + ggml_graph_overhead()*2, NULL, true };
+        ggml_context * ctx = ggml_init(ip);
 
-    ggml_tensor * q    = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, nq, Hq);
-    ggml_tensor * k    = ggml_new_tensor_3d(ctx, c.tkv,         D, T_cap, Hkv);
-    ggml_tensor * v    = ggml_new_tensor_3d(ctx, c.tkv,         D, T_cap, Hkv);
-    ggml_tensor * ks   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
-    ggml_tensor * vs   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
-    ggml_tensor * st   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
-    ggml_tensor * selx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_top);
+        ggml_tensor * q    = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, nq, Hq);
+        ggml_tensor * k    = ggml_new_tensor_3d(ctx, c.tkv,         D, T_cap, Hkv);
+        ggml_tensor * v    = ggml_new_tensor_3d(ctx, c.tkv,         D, T_cap, Hkv);
+        ggml_tensor * ks   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
+        ggml_tensor * vs   = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, D, P_cap, Hkv);
+        ggml_tensor * st   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 2);
+        ggml_tensor * selx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_top);
 
-    ggml_tensor * out_a = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, scale, (int) n_top, false);
-    ggml_tensor * out_b = ggml_lod_attn(ctx, q, k, v, ks, vs, selx, st, (int) ps, scale, 0, false);
+        ggml_tensor * out_a = ggml_lod_attn(ctx, q, k, v, ks, vs, NULL, st, (int) ps, scale, (int) n_top, false);
+        ggml_tensor * out_b = ggml_lod_attn(ctx, q, k, v, ks, vs, selx, st, (int) ps, scale, 0, false);
 
-    ggml_cgraph * gfa = ggml_new_graph(ctx);
-    ggml_cgraph * gfb = ggml_new_graph(ctx);
-    ggml_build_forward_expand(gfa, out_a);
-    ggml_build_forward_expand(gfb, out_b);
+        ggml_cgraph * gfa = ggml_new_graph(ctx);
+        ggml_cgraph * gfb = ggml_new_graph(ctx);
+        ggml_build_forward_expand(gfa, out_a);
+        ggml_build_forward_expand(gfb, out_b);
 
-    if (!ggml_backend_supports_op(backend, out_a)) {
-        ggml_free(ctx);
-        return -1;
-    }
-
-    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
-
-    auto upload_kv = [&](ggml_tensor * t, const std::vector<float> & h) {
-        if (c.tkv == GGML_TYPE_F16) {
-            std::vector<ggml_fp16_t> tmp(h.size());
-            ggml_fp32_to_fp16_row(h.data(), tmp.data(), h.size());
-            ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size()*sizeof(ggml_fp16_t));
-        } else if (ggml_is_quantized(c.tkv)) {
-            std::vector<uint8_t> tmp(ggml_row_size(c.tkv, h.size()));
-            ggml_quantize_chunk(c.tkv, h.data(), tmp.data(), 0, h.size()/D, D, nullptr);
-            ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size());
-        } else {
-            ggml_backend_tensor_set(t, h.data(), 0, h.size()*sizeof(float));
+        if (!ggml_backend_supports_op(be, out_a)) {
+            ggml_free(ctx);
+            return -1;
         }
+
+        ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, be);
+
+        auto upload_kv = [&](ggml_tensor * t, const std::vector<float> & h) {
+            if (c.tkv == GGML_TYPE_F16) {
+                std::vector<ggml_fp16_t> tmp(h.size());
+                ggml_fp32_to_fp16_row(h.data(), tmp.data(), h.size());
+                ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size()*sizeof(ggml_fp16_t));
+            } else if (ggml_is_quantized(c.tkv)) {
+                std::vector<uint8_t> tmp(ggml_row_size(c.tkv, h.size()));
+                ggml_quantize_chunk(c.tkv, h.data(), tmp.data(), 0, h.size()/D, D, nullptr);
+                ggml_backend_tensor_set(t, tmp.data(), 0, tmp.size());
+            } else {
+                ggml_backend_tensor_set(t, h.data(), 0, h.size()*sizeof(float));
+            }
+        };
+
+        const int32_t sth[2] = { (int32_t) prev_end, (int32_t) P };
+
+        ggml_backend_tensor_set(q, qh.data(), 0, qh.size()*sizeof(float));
+        upload_kv(k, kh);
+        upload_kv(v, vh);
+        ggml_backend_tensor_set(st, sth, 0, sizeof(sth));
+        ggml_backend_tensor_set(selx, selh.data(), 0, selh.size()*sizeof(int32_t));
+
+        int rc = 0;
+        for (int pass = 0; pass < 2; pass++) {
+            // the op folds the current tokens into the sums in place - re-upload per pass
+            ggml_backend_tensor_set(ks, ksh.data(), 0, ksh.size()*sizeof(float));
+            ggml_backend_tensor_set(vs, vsh.data(), 0, vsh.size()*sizeof(float));
+            if (ggml_backend_graph_compute(be, pass == 0 ? gfa : gfb) != GGML_STATUS_SUCCESS) {
+                printf("  fused: graph compute failed\n");
+                rc = 1;
+                break;
+            }
+            ggml_backend_tensor_get(pass == 0 ? out_a : out_b, (pass == 0 ? ya : yb).data(), 0, ya.size()*sizeof(float));
+        }
+
+        ggml_backend_buffer_free(buf);
+        ggml_free(ctx);
+        return rc;
     };
-
-    const int32_t sth[2] = { (int32_t) prev_end, (int32_t) P };
-
-    ggml_backend_tensor_set(q, qh.data(), 0, qh.size()*sizeof(float));
-    upload_kv(k, kh);
-    upload_kv(v, vh);
-    ggml_backend_tensor_set(st, sth, 0, sizeof(sth));
-    ggml_backend_tensor_set(selx, selh.data(), 0, selh.size()*sizeof(int32_t));
 
     std::vector<float> ya(D*Hq*nq), yb(D*Hq*nq);
 
-    bool ok = true;
-    for (int pass = 0; pass < 2; pass++) {
-        // the op folds the current tokens into the sums in place - re-upload per pass
-        ggml_backend_tensor_set(ks, ksh.data(), 0, ksh.size()*sizeof(float));
-        ggml_backend_tensor_set(vs, vsh.data(), 0, vsh.size()*sizeof(float));
-        if (ggml_backend_graph_compute(backend, pass == 0 ? gfa : gfb) != GGML_STATUS_SUCCESS) {
-            printf("  fused: graph compute failed\n");
-            ok = false;
-            break;
-        }
-        ggml_backend_tensor_get(pass == 0 ? out_a : out_b, (pass == 0 ? ya : yb).data(), 0, ya.size()*sizeof(float));
+    const int rc = exec_on(backend, ya, yb);
+    if (rc < 0) {
+        return -1;
     }
 
+    bool  ok = rc == 0;
     float md = 0.0f;
     if (ok) {
         for (size_t i = 0; i < ya.size(); i++) {
@@ -624,19 +639,39 @@ static int run_fused_case(const lod_case & c, ggml_backend_t backend, int64_t n_
         ok = md <= 1e-6f;
     }
 
-    printf("  lod fused-sel D=%3d Hkv=%d g=%d ps=%2d P=%2d tail=%2d nq=%2d n_top=%2d %s: %s (max_diff=%g)\n",
-            (int) D, (int) Hkv, (int) c.g, (int) ps, (int) P, (int) c.n_tail, (int) nq, (int) n_top,
-            c.tkv == GGML_TYPE_F16 ? "f16" : c.tkv == GGML_TYPE_Q8_0 ? "q8_0" : "f32", ok ? "OK" : "FAIL", (double) md);
+    // independent reference: the CPU implementation of the same op
+    float mr = 0.0f;
+    bool  ref_ok = true;
+    if (ok && ggml_backend_dev_type(ggml_backend_get_device(backend)) != GGML_BACKEND_DEVICE_TYPE_CPU) {
+        ggml_backend_t cpu = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+        if (cpu) {
+            std::vector<float> ca(D*Hq*nq), cb(D*Hq*nq);
+            if (exec_on(cpu, ca, cb) == 0) {
+                for (size_t i = 0; i < ya.size(); i++) {
+                    mr = std::max(mr, fabsf(ya[i] - ca[i]));
+                }
+                // both sides accumulate in F32 but in a different order, and the
+                // exponentials come from different libm/hardware paths
+                ref_ok = mr <= 2e-3f;
+                ok     = ok && ref_ok;
+            }
+            ggml_backend_free(cpu);
+        }
+    }
 
-    ggml_backend_buffer_free(buf);
-    ggml_free(ctx);
+    printf("  lod fused-sel D=%3d Hkv=%d g=%d ps=%2d P=%2d tail=%2d nq=%2d n_top=%2d %s: %s (max_diff=%g, vs_cpu=%g)\n",
+            (int) D, (int) Hkv, (int) c.g, (int) ps, (int) P, (int) c.n_tail, (int) nq, (int) n_top,
+            c.tkv == GGML_TYPE_F16 ? "f16" : c.tkv == GGML_TYPE_Q8_0 ? "q8_0" : "f32", ok ? "OK" : "FAIL",
+            (double) md, (double) mr);
+
     return ok ? 0 : 1;
 }
 
 // LOD_BENCH=1: steady-state fused-op micro-benchmark at decode geometry (keeps the
 // GPU clocked up, so per-kernel times from rocprof on this binary are trustworthy)
 static void run_bench(ggml_backend_t backend) {
-    const int64_t D = 512, Hkv = 4, g = 8, Hq = g*Hkv, nq = 1;
+    const int64_t D = getenv("LOD_BENCH_D") ? atoll(getenv("LOD_BENCH_D")) : 512;
+    const int64_t Hkv = 4, g = 8, Hq = g*Hkv, nq = 1;
     const int64_t ps = 64;
     const int64_t P = getenv("LOD_BENCH_P") ? atoll(getenv("LOD_BENCH_P")) : 256;
     const int64_t n_top = getenv("LOD_BENCH_TOP") ? atoll(getenv("LOD_BENCH_TOP")) : 32;

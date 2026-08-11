@@ -165,6 +165,10 @@ public:
     void     clear_lod_sums();
     void     lod_truncate_sums(uint32_t p0, uint32_t strm);
     void     lod_zero_sums(uint32_t p_lo, uint32_t p_hi, uint32_t strm);
+    // debug (LLAMA_LOD_CHECK=1): recompute every complete page sum from the cache rows
+    // and report any page that disagrees with the incrementally maintained value
+    void     lod_check_sums(uint32_t strm, uint32_t n_past, const char * where) const;
+    void     lod_corrupt_one_page(uint32_t strm); // LLAMA_LOD_CHECK=2 self-test
     uint32_t get_lod_sums_pos(uint32_t strm) const { return lod_sums_pos[strm]; }
     void     lod_note_sums(uint32_t strm, uint32_t pos) { lod_sums_pos[strm] = pos; }
 
@@ -427,6 +431,8 @@ public:
     bool     is_single_stream_contig() const; // LoD precondition for this ubatch
     uint32_t get_stream() const;
     uint32_t get_lod_sums_pos() const;
+    void     lod_check_sums(uint32_t n_past, const char * where) const;
+    void     lod_corrupt_one_page() const;
     void     lod_note_sums(uint32_t pos) const;
     ggml_tensor * get_k_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;
     ggml_tensor * get_v_range(ggml_context * ctx, int32_t il, uint32_t t0, uint32_t nt) const;

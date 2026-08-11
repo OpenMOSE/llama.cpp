@@ -614,6 +614,19 @@ void llm_graph_input_attn_lod::set_input(const llama_ubatch * ubatch) {
         ggml_backend_tensor_set(lod_catchup, idx.data(), 0, ggml_nbytes(lod_catchup));
     }
 
+    // LLAMA_LOD_CHECK=1: verify the maintained page sums against the cache before this
+    // ubatch folds into them - the first ubatch that reports CORRUPT names the edit that
+    // desynchronised them (prompt-cache truncation, state restore, context shift, ...)
+    static const char * check_env = getenv("LLAMA_LOD_CHECK");
+    if (check_env != nullptr && atoi(check_env) != 0 && n_tokens > 1) {
+        // LLAMA_LOD_CHECK=2 first corrupts one page on purpose: a detector that has never
+        // fired is not evidence of anything
+        if (atoi(check_env) > 1) {
+            mctx->lod_corrupt_one_page();
+        }
+        mctx->lod_check_sums(std::min(prev_end, mctx->get_lod_sums_pos()), "prefill");
+    }
+
     // after this graph runs, the sums cover everything up to the end of the ubatch
     mctx->lod_note_sums(prev_end + n_tokens);
 }
@@ -638,6 +651,7 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
     const uint32_t P_new = prev_end_new / ps;
 
     res &= base->is_single_stream_contig();
+    res &= base->get_stream() == strm; // the views bake this stream's byte offsets
     res &= base->get_lod_sums_pos() >= prev_end_new; // no pending catch-up
     res &= catchup_len == 0;
     res &= std::min(cparams.lod_top_pages, P_new) == kP;
@@ -650,7 +664,11 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
 
     if (stat_fa && mask_S > 0) {
         // the mask-direct graph bakes the fattn span; rebuild at span boundaries
-        const uint32_t S_new = std::min<uint32_t>(GGML_PAD(prev_end_new + params.ubatch.n_tokens, 4096), cparams.n_ctx_seq);
+        static const char * span_env = getenv("LLAMA_LOD_SPAN");
+        const uint32_t span_step = span_env != nullptr ? (uint32_t) std::max(0, atoi(span_env)) : 0;
+        const uint32_t S_new = span_step > 0
+            ? std::min<uint32_t>(GGML_PAD(prev_end_new + params.ubatch.n_tokens, span_step), cparams.n_ctx_seq)
+            : cparams.n_ctx_seq;
         res &= S_new == mask_S;
     }
 
@@ -3337,6 +3355,7 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
 
     inp->parent     = parent;
     inp->ps         = ps;
+    inp->strm       = mctx_base->get_stream();
     inp->prev_end   = prev_end;
     inp->P_full     = prev_end / ps;
     inp->tail_start = inp->P_full * ps;
@@ -3789,7 +3808,19 @@ ggml_tensor * llm_graph_context::build_attn(
         // cannot serve a whole segment - query granularity is everything, head
         // granularity is nearly free - so pages stay layer/head-shared per block).
         const uint32_t P_cap  = inp->P_cap;
-        const uint32_t S      = std::min<uint32_t>(GGML_PAD(prev_end + n_tokens, 4096), cparams.n_ctx_seq);
+        // span of raw cache columns the mask covers. Capacity (the default) keeps the
+        // graph shape constant for every ubatch, which is what graph reuse and the
+        // multi-device pipeline both need - a growing span reshapes the graph every
+        // few ubatches and forces a reallocation, and under pipeline parallelism that
+        // is a full-device stall. The padding costs almost nothing at run time: the
+        // columns past the causal frontier are fully masked and the mean tier sits at
+        // the front of the axis, so flash-attention's mask scan truncates the dead
+        // suffix per query tile. LLAMA_LOD_SPAN=<step> restores the growing span.
+        static const char * span_env = getenv("LLAMA_LOD_SPAN");
+        const uint32_t span_step = span_env != nullptr ? (uint32_t) std::max(0, atoi(span_env)) : 0;
+        const uint32_t S      = span_step > 0
+            ? std::min<uint32_t>(GGML_PAD(prev_end + n_tokens, span_step), cparams.n_ctx_seq)
+            : cparams.n_ctx_seq;
         inp->mask_S = S;
         const uint32_t P_span = S/ps;
         static const char * qb_env = getenv("LLAMA_LOD_QB");

@@ -6,9 +6,11 @@
 
 #include <type_traits>
 
-#define LOD_ATTN_SPLITS      32
+#define LOD_ATTN_SPLITS      32 // fallback split-K width
+#define LOD_ATTN_BPC          4 // split blocks targeted per compute unit
 #define LOD_ATTN_SPLITS_LDS 128 // the LDS variant has Hkv x-blocks instead of Hq/HPT
-#define LOD_ATTN_NTILES    4
+#define LOD_ATTN_NTILES    4  // mega ablation only; the split kernel derives its own
+#define LOD_ATTN_BLOCK   256  // lanes per split block (NTILES waves of the device width)
 #define LOD_ATTN_MAX_D   512
 #define LOD_ATTN_MAX_P  8192
 #define HPT                2  // query heads per tile (paired within one GQA group)
@@ -33,8 +35,13 @@ static __device__ __forceinline__ float lod_load1_q8(const char * p, const int d
 // device's warp size and both instantiations are compiled
 
 // one wave-wide tile processes one virtual column at a time; every lane owns two
-// consecutive elements (D is even), enabling half2/float2 loads
-template <int tile_sz>
+// consecutive elements (D is even), enabling half2/float2 loads.
+// EPL2V (value element pairs per lane) is a template parameter so the accumulator is
+// indexed by compile-time constants - with a run-time bound the whole array lands in
+// scratch. The block spans LOD_ATTN_BLOCK lanes on every device, so a 32-wide wave
+// (NVIDIA, RDNA) gets twice the tiles of a 64-wide one (CDNA) and both cover the same
+// number of virtual columns per block
+template <int tile_sz, int EPL2V>
 static __global__ void lod_attn_split_f(
         const char * __restrict__ q,  const char * __restrict__ k,  const char * __restrict__ v,
         const char * __restrict__ ks, const char * __restrict__ vs,
@@ -48,7 +55,7 @@ static __global__ void lod_attn_split_f(
         const uint64_t ks_nb1, const uint64_t ks_nb2,
         const uint64_t vs_nb1, const uint64_t vs_nb2,
         const float scale, const float logn, const int k_f16, const int v_f16,
-        const int sel_head) {
+        const int sel_head, const int nsplit) {
     const int row = blockIdx.x; // qi*(Hq/HPT) + hpair
     const int spl = blockIdx.y;
 
@@ -70,7 +77,9 @@ static __global__ void lod_attn_split_f(
     const int n_cols   = Pr + n_sel*ps + n_tail; // virtual column space
 
     const int epl2_k = (Dk/2 + tile_sz - 1)/tile_sz; // element pairs per lane
-    const int epl2_v = (Dv/2 + tile_sz - 1)/tile_sz;
+
+    constexpr int NT  = LOD_ATTN_BLOCK/tile_sz; // tiles (waves) per block
+    constexpr int DVT = 2*EPL2V*tile_sz;        // value elements one tile covers
 
     __shared__ float    sm_q[HPT][LOD_ATTN_MAX_D];
     __shared__ uint32_t sm_sel[LOD_ATTN_MAX_P/32];
@@ -93,14 +102,14 @@ static __global__ void lod_attn_split_f(
 
     float m  [HPT];
     float den[HPT];
-    float acc[HPT][LOD_ATTN_MAX_D/tile_sz] = {{ 0.0f }}; // 2 consecutive elements per slot pair
+    float acc[HPT][2*EPL2V] = {{ 0.0f }}; // 2 consecutive elements per slot pair
     for (int j = 0; j < HPT; ++j) {
         m[j]   = -INFINITY;
         den[j] = 0.0f;
     }
 
-    const int tile_g   = spl*LOD_ATTN_NTILES + tile;
-    const int tile_stp = LOD_ATTN_SPLITS*LOD_ATTN_NTILES;
+    const int tile_g   = spl*NT + tile;
+    const int tile_stp = nsplit*NT;
 
     for (int c = tile_g; c < n_cols; c += tile_stp) {
         const char * kp;
@@ -185,7 +194,8 @@ static __global__ void lod_attn_split_f(
             if (logit > m[j]) {
                 const float e = expf(m[j] - logit);
                 den[j] *= e;
-                for (int i = 0; i < 2*epl2_v; ++i) {
+#pragma unroll
+                for (int i = 0; i < 2*EPL2V; ++i) {
                     acc[j][i] *= e;
                 }
                 m[j] = logit;
@@ -197,7 +207,8 @@ static __global__ void lod_attn_split_f(
         }
 
         if (vf16 == 2) {
-            for (int e = 0; e < epl2_v; ++e) {
+#pragma unroll
+            for (int e = 0; e < EPL2V; ++e) {
                 const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dv) {
                     const float2 vv2 = lod_load2_q8(vp, i2);
@@ -209,7 +220,8 @@ static __global__ void lod_attn_split_f(
             }
         } else if (vf16) {
             const half2 * vh = (const half2 *) vp;
-            for (int e = 0; e < epl2_v; ++e) {
+#pragma unroll
+            for (int e = 0; e < EPL2V; ++e) {
                 const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dv) {
                     const float2 vv2 = __half22float2(vh[i2]);
@@ -221,7 +233,8 @@ static __global__ void lod_attn_split_f(
             }
         } else {
             const float2 * vf = (const float2 *) vp;
-            for (int e = 0; e < epl2_v; ++e) {
+#pragma unroll
+            for (int e = 0; e < EPL2V; ++e) {
                 const int i2 = lane + e*tile_sz;
                 if (2*i2 < Dv) {
                     const float2 vv2 = vf[i2];
@@ -235,9 +248,9 @@ static __global__ void lod_attn_split_f(
     }
 
     // fold the tiles of this block through shared memory, one head at a time
-    __shared__ float sm_m  [LOD_ATTN_NTILES];
-    __shared__ float sm_den[LOD_ATTN_NTILES];
-    __shared__ float sm_acc[LOD_ATTN_NTILES][LOD_ATTN_MAX_D];
+    __shared__ float sm_m  [NT];
+    __shared__ float sm_den[NT];
+    __shared__ float sm_acc[NT][DVT];
 
     for (int j = 0; j < HPT; ++j) {
         __syncthreads();
@@ -247,7 +260,8 @@ static __global__ void lod_attn_split_f(
         __syncthreads();
 
         float m_b = -INFINITY;
-        for (int t = 0; t < LOD_ATTN_NTILES; ++t) {
+#pragma unroll
+        for (int t = 0; t < NT; ++t) {
             m_b = fmaxf(m_b, sm_m[t]);
         }
 
@@ -256,7 +270,8 @@ static __global__ void lod_attn_split_f(
         if (lane == 0) {
             sm_den[tile] = den[j]*e_t;
         }
-        for (int e = 0; e < epl2_v; ++e) {
+#pragma unroll
+        for (int e = 0; e < EPL2V; ++e) {
             const int i2 = lane + e*tile_sz;
             if (2*i2 < Dv) {
                 sm_acc[tile][2*i2 + 0] = acc[j][2*e + 0]*e_t;
@@ -265,11 +280,12 @@ static __global__ void lod_attn_split_f(
         }
         __syncthreads();
 
-        float * out = part + ((uint64_t)(qi*Hq + h0 + j)*LOD_ATTN_SPLITS + spl)*(2 + Dv);
+        float * out = part + ((uint64_t)(qi*Hq + h0 + j)*nsplit + spl)*(2 + Dv);
 
         if (threadIdx.x == 0) {
             float den_b = 0.0f;
-            for (int t = 0; t < LOD_ATTN_NTILES; ++t) {
+#pragma unroll
+            for (int t = 0; t < NT; ++t) {
                 den_b += sm_den[t];
             }
             out[0] = m_b;
@@ -277,7 +293,8 @@ static __global__ void lod_attn_split_f(
         }
         for (int d = threadIdx.x; d < Dv; d += blockDim.x) {
             float a = 0.0f;
-            for (int t = 0; t < LOD_ATTN_NTILES; ++t) {
+#pragma unroll
+            for (int t = 0; t < NT; ++t) {
                 a += sm_acc[t][d];
             }
             out[2 + d] = a;
@@ -1189,7 +1206,25 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
     const bool use_lds = split_env != nullptr && strcmp(split_env, "lds") == 0 &&
             g%HPT == 0 && (g/HPT)*256 <= 1024*4 && lds_smem <= 48*1024;
 
-    const int nsplit = use_lds ? LOD_ATTN_SPLITS_LDS : LOD_ATTN_SPLITS;
+    // split-K width: the read is latency bound, so the split count is picked to keep
+    // roughly LOD_ATTN_BPC blocks per compute unit resident. Splitting further only
+    // widens the merge (measured: 128 splits lose on every geometry).
+    // GGML_LOD_SPLITS=N overrides it (ablation).
+    static const char * splits_env = getenv("GGML_LOD_SPLITS");
+
+    int nsplit = LOD_ATTN_SPLITS;
+    if (!use_lds) {
+        const int nrb = std::max(1, (nq*Hq)/HPT); // row blocks already in the grid
+        const int want = LOD_ATTN_BPC*ggml_cuda_info().devices[ctx.device].nsm / nrb;
+
+        nsplit = want >= 64 ? 64 : want >= 32 ? 32 : 16;
+    } else {
+        nsplit = LOD_ATTN_SPLITS_LDS;
+    }
+    if (splits_env != nullptr) {
+        const int e = atoi(splits_env);
+        nsplit = (e == 16 || e == 32 || e == 64 || e == 128) ? e : nsplit;
+    }
 
     ggml_cuda_pool_alloc<float> part(ctx.pool(), (size_t) n_rows*nsplit*(2 + Dv));
 
@@ -1332,19 +1367,37 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
                     scale, logf((float) ps), k_f16, v_f16,
                     op_sel_head);
         } else {
-            const dim3 grid(n_rows/HPT, LOD_ATTN_SPLITS, 1);
-            const dim3 block(TS*LOD_ATTN_NTILES, 1, 1);
+            const dim3 grid(n_rows/HPT, nsplit, 1);
+            const dim3 block(LOD_ATTN_BLOCK, 1, 1);
 
-            lod_attn_split_f<TS><<<grid, block, 0, stream>>>(
-                    (const char *) q->data, (const char *) k->data, (const char *) v->data,
-                    (const char *) ks->data, (const char *) vs->data,
-                    sel_ptr, (const int *) st->data,
-                    part.get(),
-                    Dk, Dv, Hq, Hkv, P, n_sel, ps,
-                    q->nb[1],  q->nb[2],  k->nb[1],  k->nb[2],  v->nb[1], v->nb[2],
-                    ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
-                    scale, logf((float) ps), k_f16, v_f16,
-                    op_sel_head);
+            // instantiate the accumulator width the head dim actually needs
+            const auto launch_ev = [&](auto ev_tag) {
+                constexpr int EV = decltype(ev_tag)::value;
+
+                lod_attn_split_f<TS, EV><<<grid, block, 0, stream>>>(
+                        (const char *) q->data, (const char *) k->data, (const char *) v->data,
+                        (const char *) ks->data, (const char *) vs->data,
+                        sel_ptr, (const int *) st->data,
+                        part.get(),
+                        Dk, Dv, Hq, Hkv, P, n_sel, ps,
+                        q->nb[1],  q->nb[2],  k->nb[1],  k->nb[2],  v->nb[1], v->nb[2],
+                        ks->nb[1], ks->nb[2], vs->nb[1], vs->nb[2],
+                        scale, logf((float) ps), k_f16, v_f16,
+                        op_sel_head, nsplit);
+            };
+
+            const int need = (Dv/2 + TS - 1)/TS;
+            if (need <= 1) {
+                launch_ev(std::integral_constant<int, 1>{});
+            } else if (need <= 2) {
+                launch_ev(std::integral_constant<int, 2>{});
+            } else if (need <= 4) {
+                launch_ev(std::integral_constant<int, 4>{});
+            } else if constexpr (TS < 64) { // wave64 covers LOD_ATTN_MAX_D with 4 pairs
+                launch_ev(std::integral_constant<int, 8>{});
+            } else {
+                GGML_ABORT("lod_attn: head dim too large for the split kernel");
+            }
         }
     };
     if (warp_size == 64) {
@@ -1355,9 +1408,18 @@ void ggml_cuda_lod_attn(ggml_backend_cuda_context & ctx, ggml_tensor * dst) {
 
     const dim3 grid_m(n_rows, (Dv + LOD_ATTN_MERGE_SLICE - 1)/LOD_ATTN_MERGE_SLICE, 1);
 
-    if (use_lds) {
-        lod_attn_merge_f<LOD_ATTN_SPLITS_LDS><<<grid_m, LOD_ATTN_MERGE_SLICE, 0, stream>>>(part.get(), (float *) dst->data, Dv, Hq);
-    } else {
-        lod_attn_merge_f<LOD_ATTN_SPLITS><<<grid_m, LOD_ATTN_MERGE_SLICE, 0, stream>>>(part.get(), (float *) dst->data, Dv, Hq);
+    switch (nsplit) {
+        case LOD_ATTN_SPLITS_LDS:
+            lod_attn_merge_f<LOD_ATTN_SPLITS_LDS><<<grid_m, LOD_ATTN_MERGE_SLICE, 0, stream>>>(part.get(), (float *) dst->data, Dv, Hq);
+            break;
+        case 64:
+            lod_attn_merge_f<64><<<grid_m, LOD_ATTN_MERGE_SLICE, 0, stream>>>(part.get(), (float *) dst->data, Dv, Hq);
+            break;
+        case 16:
+            lod_attn_merge_f<16><<<grid_m, LOD_ATTN_MERGE_SLICE, 0, stream>>>(part.get(), (float *) dst->data, Dv, Hq);
+            break;
+        default:
+            lod_attn_merge_f<LOD_ATTN_SPLITS><<<grid_m, LOD_ATTN_MERGE_SLICE, 0, stream>>>(part.get(), (float *) dst->data, Dv, Hq);
+            break;
     }
 }

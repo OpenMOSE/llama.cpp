@@ -652,6 +652,14 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
 
     res &= base->is_single_stream_contig();
     res &= base->get_stream() == strm; // the views bake this stream's byte offsets
+
+    // reuse and pipeline parallelism are mutually exclusive: a reused graph has a single
+    // input-buffer set, so llama_context must synchronize the scheduler before filling it,
+    // and that stalls every device once per ubatch. Prefer the rebuild path, exactly like
+    // dense prefill does. (This guard used to sit inside the static-graph branch only, so
+    // any ubatch that missed the page-aligned static path - i.e. most real prompts - lost
+    // multi-GPU prefill scaling entirely.)
+    res &= !cparams.pipeline_parallel;
     res &= base->get_lod_sums_pos() >= prev_end_new; // no pending catch-up
     res &= catchup_len == 0;
     res &= std::min(cparams.lod_top_pages, P_new) == kP;
@@ -672,12 +680,14 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
         res &= S_new == mask_S;
     }
 
+    // the padded page capacity is baked into every static-graph shape
+    res &= lod_page_capacity(prev_end_new, params.ubatch.n_tokens, ps, cparams.n_ctx_seq) == P_cap;
+
     if (stat_fa) {
         // capacity-padded graph: any aligned ubatch with a saturated budget reuses.
         // under pipeline parallelism reuse forces a scheduler synchronize per ubatch
         // (single input-buffer set), which defeats the multi-GPU pipeline - prefer
         // the rebuild path there, exactly like dense prefill
-        res &= !cparams.pipeline_parallel;
         res &= prev_end_new % ps == 0;
         res &= params.ubatch.n_tokens % ps == 0;
         res &= P_new >= cparams.lod_top_pages;
@@ -3412,7 +3422,7 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     // static prefill graph: capacity-padded shapes so the graph is reusable across
     // ubatches and the scheduler pipelines like dense. Gated on a saturated page
     // budget (top-k can then never pick an invalid page) and page alignment
-    inp->P_cap  = cparams.n_ctx_seq / ps;
+    inp->P_cap  = llm_graph_input_attn_lod::lod_page_capacity(prev_end, n_tokens, ps, cparams.n_ctx_seq);
     inp->n_full = n_tokens / ps;
     inp->stat_fa = use_fa_pre && inp->kP == cparams.lod_top_pages &&
             prev_end % ps == 0 && n_tokens % ps == 0 && inp->catchup_len == 0 &&

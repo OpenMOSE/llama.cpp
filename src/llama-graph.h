@@ -437,6 +437,16 @@ public:
     // views (cache rows, page sums, mean rows), so a graph is only reusable for the
     // same stream. With several server slots the scheduler switches streams freely.
     uint32_t strm = 0;
+
+    // capacity the static prefill graphs pad to. Padding to the whole context makes the
+    // page-score matmul [P_cap, n_tokens, n_head_q] scale with -c instead of with the
+    // live page count, so a large context slows every ubatch down for nothing. Pad to a
+    // coarse step above what the ubatch needs instead: the shape then only changes once
+    // per step, which is rare enough for graph reuse.
+    static uint32_t lod_page_capacity(uint32_t prev_end, uint32_t n_tokens, uint32_t ps, uint32_t n_ctx_seq) {
+        const uint32_t need = prev_end/ps + (n_tokens + ps - 1)/ps + 1;
+        return std::min<uint32_t>(n_ctx_seq/ps, GGML_PAD(need, 256));
+    }
     uint32_t catchup_p0 = 0, catchup_len = 0;
     uint32_t P_cap = 0, n_full = 0; // static-prefill geometry (stat_fa)
     bool     stat_fa = false;       // capacity-padded FA graph, reusable across ubatches

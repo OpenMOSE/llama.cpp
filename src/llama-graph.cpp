@@ -3696,12 +3696,29 @@ ggml_tensor * llm_graph_context::build_attn(
     // so the refinement denominator is untouched and top-k can never pick them
     // (the budget is saturated: kP real candidates always exist)
     const bool     stat_fa = inp->stat_fa;
-    const uint32_t Pv      = stat_fa ? inp->P_cap : P_full;
+
+    // Pad the page tier to the stepped capacity whenever the budget is saturated, not just
+    // in the fully static path. Sizing it by the live page count instead makes the score
+    // tensor grow by one page every ubatch, and a shape change forces the scheduler to
+    // reallocate - which synchronises every device and shows up as pipeline bubbles, so
+    // multi-GPU prefill ends up slower than a single GPU. Padding costs nothing at run time
+    // (the extra pages are silenced exactly) and keeps the shape stable for ~256 pages.
+    // Saturation is required: top-k must never be able to pick an invalid page, because the
+    // leaf tier has no mask to silence one.
+    const bool     pad_pages = kP > 0 && P_full >= kP;
+    const uint32_t Pv        = (stat_fa || pad_pages) ? inp->P_cap : P_full;
 
     ggml_tensor * logv = inp->sh_logv; // [Pv]: 0 for valid pages, -inf past the runtime count
-    if (stat_fa && logv == nullptr) {
-        ggml_tensor * pr = ggml_repeat(ctx0, inp->lod_pmeta, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, Pv));
-        logv = ggml_log(ctx0, ggml_step(ctx0, ggml_sub(ctx0, pr, ggml_arange(ctx0, 0.5f, (float) Pv + 0.5f, 1.0f))));
+    if (Pv > P_full && logv == nullptr) {
+        ggml_tensor * ar = ggml_arange(ctx0, 0.5f, (float) Pv + 0.5f, 1.0f);
+        if (inp->lod_pmeta != nullptr) {
+            // static graphs carry the runtime page count in an input
+            ggml_tensor * pr = ggml_repeat(ctx0, inp->lod_pmeta, ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, Pv));
+            logv = ggml_log(ctx0, ggml_step(ctx0, ggml_sub(ctx0, pr, ar)));
+        } else {
+            // rebuilt graphs can bake it: only the value changes per ubatch, not the shape
+            logv = ggml_log(ctx0, ggml_step(ctx0, ggml_scale_bias(ctx0, ar, -1.0f, (float) P_full)));
+        }
         inp->sh_logv = logv;
     }
 

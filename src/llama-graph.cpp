@@ -627,6 +627,18 @@ void llm_graph_input_attn_lod::set_input(const llama_ubatch * ubatch) {
         mctx->lod_check_sums(std::min(prev_end, mctx->get_lod_sums_pos()), "prefill");
     }
 
+    // LLAMA_LOD_DBG_UBATCH=1: one line per ubatch with the geometry the read was built
+    // from. Diffing this between b==ub and b>ub shows whether a split batch drives the
+    // geometry somewhere different, or whether the geometry is identical and the loss is
+    // downstream of it.
+    static const char * dbg_ub = getenv("LLAMA_LOD_DBG_UBATCH");
+    if (dbg_ub != nullptr && atoi(dbg_ub) != 0) {
+        LLAMA_LOG_WARN("lod_ub: pos0=%d n_tok=%u prev_end=%u P_full=%u tail=%u kP=%u "
+                "n_exact=%u catchup=%u sums_pos=%u stat_fa=%d P_cap=%u\n",
+                (int) ubatch->pos[0], n_tokens, prev_end, P_full, tail_start, kP,
+                n_exact_pad, catchup_len, mctx->get_lod_sums_pos(), stat_fa ? 1 : 0, P_cap);
+    }
+
     // after this graph runs, the sums cover everything up to the end of the ubatch
     mctx->lod_note_sums(prev_end + n_tokens);
 }
@@ -662,7 +674,8 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
     res &= !cparams.pipeline_parallel;
     res &= base->get_lod_sums_pos() >= prev_end_new; // no pending catch-up
     res &= catchup_len == 0;
-    res &= std::min(cparams.lod_top_pages, P_new) == kP;
+    const uint32_t top_max = dec ? cparams.lod_top_pages_dec : cparams.lod_top_pages;
+    res &= std::min(top_max, P_new) == kP;
 
     // the fused path takes its geometry from lod_meta at run time; the other paths bake
     // view offsets into the graph and only hold within one page window
@@ -690,7 +703,7 @@ bool llm_graph_input_attn_lod::can_reuse(const llm_graph_params & params) {
         // the rebuild path there, exactly like dense prefill
         res &= prev_end_new % ps == 0;
         res &= params.ubatch.n_tokens % ps == 0;
-        res &= P_new >= cparams.lod_top_pages;
+        res &= P_new >= top_max;
         res &= P_new*ps + n_exact_pad <= cparams.n_ctx_seq;
     }
 
@@ -3369,7 +3382,11 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     inp->prev_end   = prev_end;
     inp->P_full     = prev_end / ps;
     inp->tail_start = inp->P_full * ps;
-    inp->kP         = std::min(cparams.lod_top_pages, inp->P_full);
+    // one token per query at decode, a whole ubatch sharing one page set at prefill: the
+    // phases get separate budgets (see llama_cparams)
+    inp->dec        = n_tokens <= 8;
+    const uint32_t top_max_inp = inp->dec ? cparams.lod_top_pages_dec : cparams.lod_top_pages;
+    inp->kP         = std::min(top_max_inp, inp->P_full);
     inp->NL         = inp->kP * ps;
 
     // reserve/probe graphs run set_input on dummy state, so the counter can be ahead;
@@ -3424,7 +3441,7 @@ llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_
     // budget (top-k can then never pick an invalid page) and page alignment
     inp->P_cap  = llm_graph_input_attn_lod::lod_page_capacity(prev_end, n_tokens, ps, cparams.n_ctx_seq);
     inp->n_full = n_tokens / ps;
-    inp->stat_fa = use_fa_pre && inp->kP == cparams.lod_top_pages &&
+    inp->stat_fa = use_fa_pre && inp->kP == top_max_inp &&
             prev_end % ps == 0 && n_tokens % ps == 0 && inp->catchup_len == 0 &&
             inp->n_exact_pad == ps + n_tokens;
 
@@ -3506,7 +3523,10 @@ ggml_tensor * llm_graph_context::build_attn(
     const uint32_t tail_start = inp->tail_start;
     const uint32_t n_exact    = inp->n_exact_pad;
     // per-layer budget (inp->kP is the max-based value used by the shared gates)
-    const uint32_t kP         = std::min<uint32_t>(cparams.lod_top_pages_l[il], P_full);
+    const auto & top_pages_l   = inp->dec ? cparams.lod_top_pages_dec_l   : cparams.lod_top_pages_l;
+    const auto & top_regions_l = inp->dec ? cparams.lod_top_regions_dec_l : cparams.lod_top_regions_l;
+
+    const uint32_t kP         = std::min<uint32_t>(top_pages_l[il], P_full);
     const uint32_t NL         = kP*ps;
 
     const int64_t n_head_kv      = k_cur->ne[1];
@@ -3528,6 +3548,15 @@ ggml_tensor * llm_graph_context::build_attn(
     };
     const bool use_fused = !use_fa && cparams.lod_fused && kP > 0 && n_tokens <= 8 && n_embd_head_v <= 1024 &&
             lod_type_ok(mctx_cur->type_k()) && lod_type_ok(mctx_cur->type_v());
+
+    // LLAMA_LOD_DBG_SHAPES=1: one line per layer naming the geometry the graph is being
+    // built for. When a shape assert fires, the last line printed IS the failing case.
+    if (getenv("LLAMA_LOD_DBG_SHAPES") != nullptr) {
+        LLAMA_LOG_INFO("lod dbg: il=%d n_tokens=%d prev_end=%u P_full=%u P_cap=%u kP=%u "
+                "n_exact=%u catchup=%u fa=%d fused=%d\n",
+                il, (int) n_tokens, prev_end, P_full, inp->P_cap, kP,
+                n_exact, inp->catchup_len, (int) use_fa, (int) use_fused);
+    }
 
     // fold this ubatch into the page sums; sums accumulate from the raw (pre-quantization) K/V
     {
@@ -3650,13 +3679,83 @@ ggml_tensor * llm_graph_context::build_attn(
 
     ggml_tensor * q = ggml_permute(ctx0, q_cur, 0, 2, 1, 3); // [D_k, n_tokens, n_head_q]
 
+    // LLAMA_LOD_PROFILE=1: emit, per layer, the true dense attention mass of each complete
+    // page and the LoD page score for the same query. Ranking the pages by score and taking
+    // the cumulative mass gives capture(k) for EVERY budget k from this one pass, which is
+    // what a per-layer budget search needs (run it with a saturating budget so the read is
+    // exactly dense). Emitted for the last query of the ubatch - the most recent context,
+    // and the only query at decode.
+    // read per build, not once: llama-lod-search turns profiling off after it has used one
+    // profiled pass to discover the LoD layers, and a cached flag would keep the branch (and
+    // its cost) in every later graph
+    const char * prof_env = getenv("LLAMA_LOD_PROFILE");
+    if (prof_env != nullptr && atoi(prof_env) != 0 && P_full > 0 && n_tokens > 1) {
+        const uint32_t T = P_full*ps; // complete pages only: visible to EVERY query here
+
+        // Sample queries across the ubatch rather than profiling one. Prefill picks ONE
+        // page set for the whole ubatch, so what decides whether a budget is enough is the
+        // union of what all those queries want - profiling the last query alone measures a
+        // distribution dominated by recent context, which the exact tail already covers,
+        // and produces budgets that lose badly on real retrieval (measured 3/12 vs 11/12).
+        // LLAMA_LOD_PROFILE=1 samples queries spread across the ubatch, which is what a
+        // gather-mode selection has to serve with ONE page set. =2 samples 32 CONSECUTIVE
+        // queries instead, i.e. exactly one mask-mode selection block, so the two runs
+        // measure what the per-block granularity is worth at the same budget.
+        const bool    block_mode = atoi(prof_env) >= 2;
+        const int64_t n_samp = std::min<int64_t>(32, n_tokens);
+        const int64_t stride = block_mode ? 1 : std::max<int64_t>(1, n_tokens/n_samp);
+        const int64_t off    = block_mode ? std::max<int64_t>(0, n_tokens - n_samp) : 0;
+
+        ggml_tensor * qs = ggml_cont(ctx0, ggml_view_3d(ctx0, q, n_embd_head_k, n_samp, n_head_q,
+                stride*q->nb[1], q->nb[2], off*q->nb[1]));            // [D, n_samp, n_head_q]
+
+        ggml_tensor * kall = mctx_cur->get_k_range(ctx0, il, 0, T);   // [D, T, n_head_kv]
+        ggml_tensor * lg   = ggml_mul_mat(ctx0, kall, qs);            // [T, n_samp, n_head_q]
+        ggml_mul_mat_set_prec(lg, GGML_PREC_F32);
+        lg = ggml_soft_max_ext(ctx0, lg, nullptr, kq_scale, 0.0f);
+
+        // sum the weights inside each page: avg-pool then undo the 1/ps
+        ggml_tensor * pm = ggml_pool_2d(ctx0,
+                ggml_reshape_3d(ctx0, lg, ps, P_full, n_samp*n_head_q),
+                GGML_OP_POOL_AVG, ps, 1, ps, 1, 0, 0);                // [1, P_full, n_samp*n_head_q]
+        pm = ggml_scale(ctx0, ggml_cont(ctx0, pm), (float) ps);
+        pm = ggml_reshape_2d(ctx0, pm, P_full, n_samp*n_head_q);
+        cb(pm, "lod_prof_mass", il);
+        ggml_build_forward_expand(gf, pm);
+
+        // the selector max-pools its score over queries and heads; emit the same axes so the
+        // consumer reproduces exactly that pooling
+        ggml_tensor * ps_score = ggml_mul_mat(ctx0,
+                mctx_cur->get_k_page_sums(ctx0, il, 0, P_full), qs);  // [P_full, n_samp, n_head_q]
+        ggml_mul_mat_set_prec(ps_score, GGML_PREC_F32);
+        ps_score = ggml_reshape_2d(ctx0, ps_score, P_full, n_samp*n_head_q);
+        cb(ps_score, "lod_prof_score", il);
+        ggml_build_forward_expand(gf, ps_score);
+
+        // =3 additionally emits the head-pooled score of EVERY query, so the consumer can
+        // form each 32-query block's selection and measure how big their UNION is. That
+        // number decides whether per-block selection can be served by a compact gather
+        // (union x ps leaf rows) instead of reading the whole span the way mask does.
+        if (atoi(prof_env) >= 3) {
+            ggml_tensor * sa = ggml_mul_mat(ctx0,
+                    mctx_cur->get_k_page_sums(ctx0, il, 0, P_full), q); // [P_full, n_tokens, n_head_q]
+            ggml_mul_mat_set_prec(sa, GGML_PREC_F32);
+            sa = ggml_cont(ctx0, ggml_permute(ctx0, sa, 1, 0, 2, 3));   // [n_tokens, P_full, n_head_q]
+            sa = ggml_cont(ctx0, ggml_permute(ctx0, sa, 0, 2, 1, 3));   // [n_tokens, n_head_q, P_full]
+            sa = ggml_pool_2d(ctx0, sa, GGML_OP_POOL_MAX, 1, n_head_q, 1, n_head_q, 0, 0);
+            sa = ggml_reshape_2d(ctx0, ggml_cont(ctx0, sa), n_tokens, P_full);
+            cb(sa, "lod_prof_qscore", il);
+            ggml_build_forward_expand(gf, sa);
+        }
+    }
+
     // on-device mask parts (no CPU fill, no upload): the structure is fully regular.
     // exact tier: (i, j) visible iff tail_start + i <= prev_end + j; built from two
     // aranges and log(step(x)) for an exact 0 / -inf band
     // NL-sized parts are shareable across layers only under a uniform budget
-    const bool kp_uniform = cparams.lod_top_pages_l.empty() ||
-            std::all_of(cparams.lod_top_pages_l.begin(), cparams.lod_top_pages_l.end(),
-                    [&](uint32_t v) { return v == cparams.lod_top_pages_l[0]; });
+    const bool kp_uniform = top_pages_l.empty() ||
+            std::all_of(top_pages_l.begin(), top_pages_l.end(),
+                    [&](uint32_t v) { return v == top_pages_l[0]; });
 
     ggml_tensor * m_band = inp->sh_band; // [n_exact_pad, n_tokens]
     ggml_tensor * m_leaf = kp_uniform ? inp->sh_leaf : nullptr; // [NL, n_tokens], zeros
@@ -3892,7 +3991,7 @@ ggml_tensor * llm_graph_context::build_attn(
         const uint32_t RG = 8;
         if (P_cap % RG == 0 && P_cap/RG >= 64) {
             const uint32_t nreg = P_cap/RG;
-            const uint32_t kR   = std::min<uint32_t>(cparams.lod_top_regions_l[il], nreg);
+            const uint32_t kR   = std::min<uint32_t>(top_regions_l[il], nreg);
 
             ggml_tensor * rb = ggml_pool_2d(ctx0, ggml_reshape_3d(ctx0, sb, RG, nreg, n_blk),
                     GGML_OP_POOL_MAX, RG, 1, RG, 1, 0, 0);              // [1, nreg, n_blk]
@@ -4090,7 +4189,7 @@ ggml_tensor * llm_graph_context::build_attn(
         cur = ggml_lod_attn(ctx0, q, kf, vf,
                 mctx_cur->get_k_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
                 mctx_cur->get_v_page_sums(ctx0, il, 0, cparams.n_ctx_seq/ps),
-                nullptr, inp->lod_meta, ps, kq_scale, cparams.lod_top_pages_l[il],
+                nullptr, inp->lod_meta, ps, kq_scale, top_pages_l[il],
                 cparams.lod_sel_head && n_head_kv > 1);
         cb(cur, "lod_fused", il);
 

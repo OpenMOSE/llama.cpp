@@ -271,15 +271,19 @@ llama_context::llama_context(
             }
         };
 
-        uint32_t def_p = 32, def_r = 64;
-        if (spec) {
-            parse_val(spec, def_p, def_r);
-        }
-        cparams.lod_top_pages_l.assign(n_layer, def_p);
-        cparams.lod_top_regions_l.assign(n_layer, def_r);
+        auto parse_spec = [&](const char * sp, std::vector<uint32_t> & pages, std::vector<uint32_t> & regions) {
+            uint32_t def_p = 32, def_r = 64;
+            if (sp) {
+                parse_val(sp, def_p, def_r);
+            }
+            pages.assign(n_layer, def_p);
+            regions.assign(n_layer, def_r);
 
-        if (spec) {
-            const char * c = strchr(spec, ',');
+            if (!sp) {
+                return;
+            }
+
+            const char * c = strchr(sp, ',');
             while (c != nullptr) {
                 c++;
                 uint32_t l0 = atoi(c);
@@ -295,16 +299,39 @@ llama_context::llama_context(
                 uint32_t vp = def_p, vr = def_r;
                 parse_val(e + 1, vp, vr);
                 for (uint32_t il = l0; il <= l1 && il < n_layer; ++il) {
-                    cparams.lod_top_pages_l[il]   = vp;
-                    cparams.lod_top_regions_l[il] = vr;
+                    pages[il]   = vp;
+                    regions[il] = vr;
                 }
                 c = strchr(e, ',');
             }
+        };
+
+        parse_spec(spec, cparams.lod_top_pages_l, cparams.lod_top_regions_l);
+
+        const char * spec_dec = getenv("LLAMA_LOD_TOP_PAGES_DECODE");
+        if (spec_dec) {
+            parse_spec(spec_dec, cparams.lod_top_pages_dec_l, cparams.lod_top_regions_dec_l);
+
+            // 'dense' selects a different graph in the model files, which is decided before
+            // the phase is known - so a dense escape only takes effect from the prefill spec
+            for (uint32_t il = 0; il < n_layer; ++il) {
+                if (cparams.lod_top_pages_dec_l[il] == 0) {
+                    cparams.lod_top_pages_dec_l[il]   = cparams.lod_top_pages_l[il];
+                    cparams.lod_top_regions_dec_l[il] = cparams.lod_top_regions_l[il];
+                }
+            }
+        } else {
+            cparams.lod_top_pages_dec_l   = cparams.lod_top_pages_l;
+            cparams.lod_top_regions_dec_l = cparams.lod_top_regions_l;
         }
 
-        cparams.lod_top_pages = *std::max_element(cparams.lod_top_pages_l.begin(), cparams.lod_top_pages_l.end());
+        cparams.lod_top_pages     = *std::max_element(cparams.lod_top_pages_l.begin(),     cparams.lod_top_pages_l.end());
+        cparams.lod_top_pages_dec = *std::max_element(cparams.lod_top_pages_dec_l.begin(), cparams.lod_top_pages_dec_l.end());
         if (cparams.lod_top_pages == 0) {
             cparams.lod_top_pages = 1; // all-dense spec: keep gates sane
+        }
+        if (cparams.lod_top_pages_dec == 0) {
+            cparams.lod_top_pages_dec = 1;
         }
     }
     // default: one page set per layer - per-KV-head selection reads x n_head_kv more data
@@ -314,8 +341,8 @@ llama_context::llama_context(
     cparams.lod_fused     = getenv("LLAMA_LOD_FUSED") != nullptr;
 
     if (cparams.lod) {
-        LLAMA_LOG_INFO("%s: LoD attention enabled: page_size = %u, top_pages = %u\n",
-                __func__, cparams.lod_page_size, cparams.lod_top_pages);
+        LLAMA_LOG_INFO("%s: LoD attention enabled: page_size = %u, top_pages = %u (decode %u)\n",
+                __func__, cparams.lod_page_size, cparams.lod_top_pages, cparams.lod_top_pages_dec);
 
         if (cparams.n_seq_max > 1) {
             // one active sequence at a time is required; cell contiguity is asserted at run time
@@ -1447,6 +1474,17 @@ llm_graph_result * llama_context::process_ubatch(const llama_ubatch & ubatch, ll
     // set the input data for the input tensors
     {
         //const auto t_start_us = ggml_time_us();
+
+        // LLAMA_LOD_SYNC_UBATCH=1: wait for the previous ubatch before filling inputs.
+        // Input uploads go through ggml_backend_cuda_buffer_set_tensor, which runs on
+        // cudaStreamPerThread and synchronises only that stream - it is NOT ordered against
+        // the compute stream. With several ubatches per llama_decode call there is no host
+        // synchronisation between them, so these writes can land while the previous graph
+        // is still reading the same buffers. Diagnostic switch for that race.
+        static const char * sync_ub = getenv("LLAMA_LOD_SYNC_UBATCH");
+        if (sync_ub != nullptr && atoi(sync_ub) != 0) {
+            ggml_backend_sched_synchronize(sched.get());
+        }
 
         // FIXME this call causes a crash if any model inputs were not used in the graph and were therefore not allocated
         res->set_inputs(&ubatch);

@@ -1333,6 +1333,11 @@ llama_context * common_init_result::context() {
     return pimpl->context.get();
 }
 
+void common_init_result::free_context() {
+    pimpl->samplers.clear();
+    pimpl->context.reset();
+}
+
 common_sampler * common_init_result::sampler(llama_seq_id seq_id) {
     if (seq_id < 0 || seq_id >= (int) pimpl->samplers.size()) {
         return nullptr;

@@ -437,6 +437,7 @@ public:
     // views (cache rows, page sums, mean rows), so a graph is only reusable for the
     // same stream. With several server slots the scheduler switches streams freely.
     uint32_t strm = 0;
+    bool     dec  = false;  // this graph is a decode graph (n_tokens <= 8): it uses the decode budgets
 
     // capacity the static prefill graphs pad to. Padding to the whole context makes the
     // page-score matmul [P_cap, n_tokens, n_head_q] scale with -c instead of with the

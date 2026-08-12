@@ -1,0 +1,65 @@
+{
+  "budget_total": 1408,
+  "default": {
+    "prefill": 32
+  },
+  "guard_logprob": 0.0,
+  "guard_logprob_uniform": 0.0,
+  "layers": {
+    "11": {
+      "prefill": 192
+    },
+    "15": {
+      "prefill": 64
+    },
+    "19": {
+      "prefill": 192
+    },
+    "23": {
+      "prefill": 64
+    },
+    "27": {
+      "prefill": 64
+    },
+    "3": {
+      "prefill": 64
+    },
+    "31": {
+      "prefill": 192
+    },
+    "35": {
+      "prefill": 64
+    },
+    "39": {
+      "prefill": 64
+    },
+    "43": {
+      "prefill": 64
+    },
+    "47": {
+      "prefill": 64
+    },
+    "51": {
+      "prefill": 64
+    },
+    "55": {
+      "prefill": 64
+    },
+    "59": {
+      "prefill": 64
+    },
+    "63": {
+      "prefill": 64
+    },
+    "7": {
+      "prefill": 64
+    }
+  },
+  "model": "/home/mose/Projects/llm/Qwen3.6-27B-Q4_K_M.gguf",
+  "n_ctx_calibrated": 32768,
+  "n_tokens_calibrated": 26761,
+  "objective": "retrieval_logprob",
+  "page_size": 64,
+  "prefill_logprob": 3.9695515274494615,
+  "prefill_uniform": 3.9624135526078614
+}

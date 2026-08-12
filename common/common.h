@@ -913,6 +913,11 @@ struct common_init_result {
     llama_model * model();
     llama_context * context();
 
+    // release the context while keeping the model loaded. A tool that evaluates many
+    // configurations builds its own context per candidate; holding this one as well doubles
+    // the KV cache it needs at peak for no benefit.
+    void free_context();
+
     common_sampler * sampler(llama_seq_id seq_id);
     void reset_samplers();
 

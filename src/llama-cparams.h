@@ -57,6 +57,14 @@ struct llama_cparams {
     uint32_t lod_top_pages;                 // max over layers (gates, reuse checks)
     std::vector<uint32_t> lod_top_pages_l;   // per-layer leaf budgets; 0 = dense escape
     std::vector<uint32_t> lod_top_regions_l; // per-layer region budgets (selection tier)
+    // decode reads with its own budget: the two phases have different levers. At decode the
+    // selection is already per-query (one token = one query), so the only thing a bigger
+    // budget buys is coverage - which is what long generations need. Prefill shares one page
+    // set across the ubatch, so there granularity matters more than budget. Decode budget is
+    // also the cheaper one to raise (token generation is weight-bandwidth bound).
+    uint32_t lod_top_pages_dec;
+    std::vector<uint32_t> lod_top_pages_dec_l;
+    std::vector<uint32_t> lod_top_regions_dec_l;
 
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;

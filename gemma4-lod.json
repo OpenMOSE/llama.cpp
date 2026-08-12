@@ -1,0 +1,47 @@
+{
+  "budget_total": 320,
+  "default": {
+    "prefill": 32
+  },
+  "guard_logprob": 2.952092118584148,
+  "guard_logprob_uniform": 4.1636604831493775,
+  "layers": {
+    "11": {
+      "prefill": 8
+    },
+    "17": {
+      "prefill": 8
+    },
+    "23": {
+      "prefill": 128
+    },
+    "29": {
+      "prefill": 8
+    },
+    "35": {
+      "prefill": 8
+    },
+    "41": {
+      "prefill": 8
+    },
+    "47": {
+      "prefill": 8
+    },
+    "5": {
+      "prefill": 8
+    },
+    "53": {
+      "prefill": 8
+    },
+    "59": {
+      "prefill": 128
+    }
+  },
+  "model": "/home/mose/Projects/llm/gemma-4-31B_q4_0-it.gguf",
+  "n_ctx_calibrated": 32768,
+  "n_tokens_calibrated": 26592,
+  "objective": "retrieval_logprob",
+  "page_size": 64,
+  "prefill_logprob": -1.2260455419239127,
+  "prefill_uniform": -1.6295905250796687
+}

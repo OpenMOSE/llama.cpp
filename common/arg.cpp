@@ -1645,10 +1645,72 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--lod-config"}, "FILE",
+        "LoD: per-layer budgets from a JSON file produced by llama-lod-search.\n"
+        "Overrides --lod-top-pages / --lod-top-pages-decode for the layers it names.",
+        [](common_params & params, const std::string & value) {
+            std::ifstream f(value);
+            if (!f) {
+                throw std::invalid_argument("--lod-config: cannot open " + value);
+            }
+            nlohmann::json j = nlohmann::json::parse(f, nullptr, true, true);
+
+            if (j.contains("page_size")) {
+                setenv("LLAMA_LOD_PAGE_SIZE", std::to_string(j["page_size"].get<int>()).c_str(), 1);
+            }
+
+            // the file is translated into the existing per-layer spec grammar, so there is
+            // exactly one code path that interprets budgets
+            const auto build = [&](const char * field, const std::string & fallback) {
+                std::string spec = fallback;
+                if (j.contains("default") && j["default"].contains(field)) {
+                    const auto & d = j["default"][field];
+                    spec = d.is_string() ? d.get<std::string>() : std::to_string(d.get<int>());
+                }
+                if (j.contains("layers")) {
+                    for (const auto & [il, v] : j["layers"].items()) {
+                        if (!v.contains(field)) {
+                            continue;
+                        }
+                        const auto & e = v[field];
+                        std::string val = e.is_string() ? e.get<std::string>() : std::to_string(e.get<int>());
+                        if (v.contains("regions") && !e.is_string()) {
+                            val += ":" + std::to_string(v["regions"].get<int>());
+                        }
+                        spec += "," + il + "=" + val;
+                    }
+                }
+                return spec;
+            };
+
+            setenv("LLAMA_LOD", "1", 1);
+            setenv("LLAMA_LOD_FUSED", "1", 0);
+            setenv("LLAMA_LOD_TOP_PAGES", build("prefill", "32").c_str(), 1);
+
+            const std::string dec = build("decode", "");
+            if (!dec.empty() && dec != "32") {
+                setenv("LLAMA_LOD_TOP_PAGES_DECODE", dec.c_str(), 1);
+            }
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod-top-pages-decode"}, "SPEC",
+        "LoD: per-layer read budgets for token generation, same grammar as --lod-top-pages.\n"
+        "Decode selects pages per token, so a larger budget buys coverage - which long\n"
+        "generations need - and it is the cheap phase to spend it in (generation is\n"
+        "weight-bandwidth bound). Defaults to the --lod-top-pages value.",
+        [](common_params & params, const std::string & value) {
+            setenv("LLAMA_LOD_TOP_PAGES_DECODE", value.c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
         {"--lod-prefill"}, "MODE",
-        "LoD: prompt-processing mode. 'mask' selects pages per 32-query block and is what\n"
-        "makes multi-key retrieval hold up in long contexts; 'gather' shares one page set\n"
-        "across the whole ubatch and processes prompts faster (default: mask)",
+        "LoD: prompt-processing mode. 'mask' selects pages per 32-query block, which is what\n"
+        "makes multi-key retrieval scale with the budget in long contexts (32k: 3/3 at 128\n"
+        "pages vs gather stuck at 1/3); 'gather' shares one page set across the whole ubatch\n"
+        "and processes prompts ~60%% faster (default: gather)",
         [](common_params & params, const std::string & value) {
             if (value != "mask" && value != "gather") {
                 throw std::invalid_argument("--lod-prefill must be 'mask' or 'gather'");

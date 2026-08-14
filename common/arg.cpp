@@ -1731,6 +1731,117 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ));
     add_opt(common_arg(
+        {"--lod2"},
+        "enable LoD2 (Key-Value Means) sparse attention for full-attention layers (experimental). "
+        "Needs one KV cache stream per sequence, so it is incompatible with --kv-unified",
+        [](common_params & params) {
+            setenv("LLAMA_LOD2", "1", 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-growth"}, "F",
+        "LoD2: state size as a multiple of sqrt(context), i.e. slots = F*sqrt(N) (default: 16)",
+        [](common_params & params, const std::string & value) {
+            setenv("LLAMA_LOD2_GROWTH", value.c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-state-min"}, "N",
+        "LoD2: floor on the number of state slots (default: 256)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_STATE_MIN", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-local"}, "N",
+        "LoD2: tokens attended exactly at the end of the context during generation. "
+        "Must be a multiple of --lod2-chunk (default: 512)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_LOCAL", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-chunk"}, "N",
+        "LoD2: tokens the state absorbs per step, and the granularity of the local "
+        "window boundary (default: 256)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_CHUNK", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-routes"}, "N",
+        "LoD2: slots opened to their exact tokens per query during generation (default: 8). "
+        "This is the accuracy/speed knob; open every slot and LoD2 equals dense attention",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_ROUTES", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-routes-prefill"}, "N",
+        "LoD2: slots opened per query during prompt processing (default: 3)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_ROUTES_PREFILL", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-page"}, "N",
+        "LoD2: tokens per page within a slot; a routed slot reads one page exactly (default: 16)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_PAGE", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-pages-per-slot"}, "N",
+        "LoD2: page-table capacity per slot (default: 128)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_PAGES_PER_SLOT", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-sink"}, "N",
+        "LoD2: leading slots that stay in the coarse branch and are never routed (default: 1)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_SINK", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-update"}, "N",
+        "LoD2: columns absorbed per state update during prompt processing (default: 5*--lod2-chunk)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_UPDATE", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-layers"}, "SPEC",
+        "LoD2: \"il,il,...\" selects exactly those layers; every other full-attention "
+        "layer stays dense (default: all of them)",
+        [](common_params & params, const std::string & value) {
+            setenv("LLAMA_LOD2_LAYERS", value.c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
+        {"--lod2-tiled"}, "MASK",
+        "LoD2: tiled prompt-processing kernels, a bit mask - 1 local branch, 2 coarse "
+        "branch, 3 both, 0 the per-query reference kernel. The tiled kernels give "
+        "identical output and roughly twice the prompt throughput (default: 3)",
+        [](common_params & params, int value) {
+            setenv("LLAMA_LOD2_TILED", std::to_string(value).c_str(), 1);
+            GGML_UNUSED(params);
+        }
+    ));
+    add_opt(common_arg(
         {"--swa-full"},
         string_format("use full-size SWA cache (default: %s)\n"
             "[(more info)](https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)", params.swa_full ? "true" : "false"),

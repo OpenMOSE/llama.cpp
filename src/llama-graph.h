@@ -391,6 +391,63 @@ public:
 // LoD sparse attention: read the past through a page-sum index instead of dense attention
 // tiers: [leaves of top-k pages | raw tail + current tokens (exact, causal) | page summaries]
 // all tiers share one softmax, so the denominator is complete for any selection
+// LoD2 (docs/lod2-port-spec.md).  Unlike LoD, nothing here is a page window:
+// the graph only carries the schedule decided at build time, and the state
+// lives in the KV cache.
+class llm_graph_input_attn_lod2 : public llm_graph_input_i {
+public:
+    llm_graph_input_attn_lod2(
+            const llama_cparams & cparams,
+            const llama_kv_cache_context * mctx) :
+        cparams(cparams),
+        mctx(mctx) {
+    }
+    ~llm_graph_input_attn_lod2() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    // Reusable exactly when this ubatch needs no state update: the update
+    // nodes bake their block bounds, and l0 / s_len only move when a block is
+    // absorbed.  Everything else that changes per token (q0) travels in
+    // lod2_meta, which set_input refills.  During generation that is 255 of
+    // every 256 tokens.
+    bool can_reuse(const llm_graph_params & params) override;
+
+    ggml_tensor * get_k_idxs() const { return self_k_idxs; }
+    ggml_tensor * get_v_idxs() const { return self_v_idxs; }
+
+    ggml_tensor * self_k_idxs = nullptr; // I64 [n_batch]
+    ggml_tensor * self_v_idxs = nullptr; // I64 [n_batch]
+
+    ggml_tensor * lod2_meta = nullptr;   // I32 [4, n_groups] = { q0 }, read by the op
+
+    const llama_cparams & cparams;
+    const llama_kv_cache_context * mctx; // re-resolved by can_reuse
+
+    // A ubatch carries one group per sequence it batches: with a KV stream per
+    // sequence each group has its own archive, its own state and its own
+    // schedule, and the op is issued once per group over that group's slice of
+    // the queries.  A single-sequence ubatch is the one-group case.
+    struct group {
+        uint32_t strm = 0;      // KV stream, i.e. which state plane
+        uint32_t t0   = 0;      // this group's first query inside the ubatch
+        uint32_t nt   = 0;      // how many queries it owns
+        uint32_t p0   = 0;      // first position of the group in its sequence
+        uint32_t p1   = 0;      // one past the last
+
+        // state as it must be BEFORE this group attends, and AFTER its
+        // trailing updates; set_input publishes the latter, so a reserved
+        // graph that is never computed cannot advance the cache state
+        uint32_t coverage_pre  = 0, slots_pre  = 0;
+        uint32_t coverage_post = 0, slots_post = 0;
+    };
+
+    std::vector<group> groups;
+
+    uint32_t p0 = 0; // first position of group 0, kept for can_reuse
+    uint32_t p1 = 0;
+};
+
 class llm_graph_input_attn_lod : public llm_graph_input_i {
 public:
     llm_graph_input_attn_lod(
@@ -1275,6 +1332,22 @@ struct llm_graph_context {
 
     ggml_tensor * build_attn(
             llm_graph_input_attn_lod * inp,
+            ggml_tensor * wo,
+            ggml_tensor * wo_b,
+            ggml_tensor * wo_s,
+            ggml_tensor * q_cur, // [n_embd_head_q, n_head_q, n_tokens]
+            ggml_tensor * k_cur, // [n_embd_head_k, n_head_k, n_tokens]
+            ggml_tensor * v_cur, // [n_embd_head_v, n_head_v, n_tokens]
+            ggml_tensor * kq_b,
+            ggml_tensor * sinks, // [n_head_q]
+            ggml_tensor * v_mla,
+                  float   kq_scale,
+                    int   il) const;
+
+    llm_graph_input_attn_lod2 * build_attn_inp_lod2(const llama_kv_cache_context * mctx_base) const;
+
+    ggml_tensor * build_attn(
+            llm_graph_input_attn_lod2 * inp,
             ggml_tensor * wo,
             ggml_tensor * wo_b,
             ggml_tensor * wo_s,

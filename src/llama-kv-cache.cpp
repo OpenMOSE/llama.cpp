@@ -111,6 +111,33 @@ llama_kv_cache::llama_kv_cache(
         LLAMA_LOG_INFO("%s: LoD index enabled, page size = %u\n", __func__, lod_page_size);
     }
 
+    // env: LLAMA_LOD2 - the content-addressed engine keeps its own per-layer state
+    // next to the archive; the archive itself is this cache, unchanged.
+    if (getenv("LLAMA_LOD2") != nullptr && swa_type == LLAMA_SWA_TYPE_NONE && n_swa == 0 && !hparams.is_mla()) {
+        lod2 = true;
+
+        // the routed branch gathers individual V rows, so V must stay token-major
+        this->v_trans = false;
+        v_trans       = false;
+
+        auto env_u32 = [](const char * name, uint32_t def) {
+            const char * v = getenv(name);
+            return v ? (uint32_t) std::max(1, atoi(v)) : def;
+        };
+        lod2_p.chunk_len      = env_u32("LLAMA_LOD2_CHUNK", 256);
+        lod2_p.local_len      = env_u32("LLAMA_LOD2_LOCAL", 512);
+        lod2_p.page_size      = env_u32("LLAMA_LOD2_PAGE",   16);
+        lod2_p.state_growth   = getenv("LLAMA_LOD2_GROWTH") ? (float) atof(getenv("LLAMA_LOD2_GROWTH")) : 16.0f;
+        lod2_p.state_min      = env_u32("LLAMA_LOD2_STATE_MIN", 256);
+        lod2_p.pages_per_slot = env_u32("LLAMA_LOD2_PAGES_PER_SLOT", 128);
+
+        lod2_coverage.assign(n_stream, 0);
+        lod2_slots   .assign(n_stream, 0);
+
+        LLAMA_LOG_INFO("%s: LoD2 state enabled: %u slots, %u pages per layer\n", __func__,
+                lod2_p.slot_capacity(kv_size), lod2_p.page_capacity(kv_size));
+    }
+
     const uint32_t n_layer = hparams.n_layer_all;
 
     // define a comparator for the buft -> ctx map to ensure that the order is well-defined:
@@ -287,9 +314,41 @@ llama_kv_cache::llama_kv_cache(
             }
         }
 
+        ggml_tensor * lod2_s_kv  = nullptr;
+        ggml_tensor * lod2_s_mn  = nullptr;
+        ggml_tensor * lod2_p_kv  = nullptr;
+        ggml_tensor * lod2_p_idx = nullptr;
+        ggml_tensor * lod2_s_pg  = nullptr;
+        ggml_tensor * lod2_meta  = nullptr;
+
+        if (lod2) {
+            const uint32_t s_cap = lod2_p.slot_capacity(kv_size);
+            const uint32_t p_cap = lod2_p.page_capacity(kv_size);
+            const uint32_t h_kv  = hparams.n_head_kv(il);
+            // one row is key_sum | value_sum | count, so a slot or a page is a
+            // single contiguous row and its count is a strided view
+            const uint32_t d_s   = hparams.n_embd_head_k(il) + hparams.n_embd_head_v(il) + 1;
+
+            lod2_s_kv  = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, d_s, s_cap, h_kv, n_stream);
+            // the means the read path uses, maintained by the update op
+            lod2_s_mn  = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, d_s - 1, s_cap, h_kv, n_stream);
+            lod2_p_kv  = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, d_s, p_cap, h_kv, n_stream);
+            lod2_p_idx = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, lod2_p.page_size, p_cap, h_kv, n_stream);
+            lod2_s_pg  = ggml_new_tensor_4d(ctx, GGML_TYPE_I32, lod2_p.pages_per_slot + 1, s_cap, h_kv, n_stream);
+            lod2_meta  = ggml_new_tensor_3d(ctx, GGML_TYPE_I32, 4, h_kv, n_stream);
+
+            ggml_format_name(lod2_s_kv,  "cache_lod2_s_kv_l%d",  il);
+            ggml_format_name(lod2_s_mn,  "cache_lod2_s_mn_l%d",  il);
+            ggml_format_name(lod2_p_kv,  "cache_lod2_p_kv_l%d",  il);
+            ggml_format_name(lod2_p_idx, "cache_lod2_p_idx_l%d", il);
+            ggml_format_name(lod2_s_pg,  "cache_lod2_s_pg_l%d",  il);
+            ggml_format_name(lod2_meta,  "cache_lod2_meta_l%d",  il);
+        }
+
         map_layer_ids[il] = layers.size();
 
-        layers.push_back({ il, k, v, k_stream, v_stream, k_page, v_page, k_mean, v_mean, });
+        layers.push_back({ il, k, v, k_stream, v_stream, k_page, v_page, k_mean, v_mean,
+                           lod2_s_kv, lod2_s_mn, lod2_p_kv, lod2_p_idx, lod2_s_pg, lod2_meta, });
     }
 
     if (reuse) {
@@ -418,10 +477,42 @@ void llama_kv_cache::clear(bool data) {
         for (auto & [_, buf] : ctxs_bufs) {
             ggml_backend_buffer_clear(buf.get(), 0);
         }
+        lod2_coverage.assign(lod2_coverage.size(), 0);
+        lod2_slots   .assign(lod2_slots   .size(), 0);
     } else {
         // the page sums are derived from cell contents, they must not survive a metadata clear
         clear_lod_sums();
+        clear_lod2_state();
     }
+}
+
+// The LoD2 state is a set of running sums over cells, so it cannot outlive the
+// cells: a metadata-only clear must physically zero it, not just reset a counter.
+void llama_kv_cache::clear_lod2_state() {
+    for (uint32_t strm = 0; strm < n_stream; ++strm) {
+        clear_lod2_state_stream(strm);
+    }
+}
+
+void llama_kv_cache::clear_lod2_state_stream(uint32_t strm) {
+    if (!lod2) {
+        return;
+    }
+    for (const auto & layer : layers) {
+        for (ggml_tensor * t : { layer.lod2_s_kv, layer.lod2_s_mn, layer.lod2_p_kv, layer.lod2_s_pg, layer.lod2_meta }) {
+            if (t == nullptr) {
+                continue;
+            }
+            // the stream is the outermost dimension of every LoD2 table
+            const size_t sz = ggml_nbytes(t)/n_stream;
+            const std::vector<uint8_t> zeros(sz, 0);
+            ggml_backend_tensor_set(t, zeros.data(), strm*sz, sz);
+        }
+        // p_idx lanes are written before they are read (a lane is only visited
+        // when its page count covers it), so it needs no reset
+    }
+    lod2_coverage[strm] = 0;
+    lod2_slots   [strm] = 0;
 }
 
 void llama_kv_cache::clear_lod_sums() {
@@ -587,6 +678,38 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
         } else {
             // removing a middle range would leave unrepairable sums
             return false;
+        }
+    }
+
+    // The LoD2 state is a running sum over the cells it absorbed, so it cannot
+    // follow a removal by subtracting: the information to undo an addition is
+    // not kept.  A suffix removal is still supportable, because the retained
+    // cells are still in the archive: drop the state and let the next ubatch's
+    // schedule rebuild it from position zero.  That costs one catch-up pass and
+    // is what the server's prompt-cache trimming needs.  A hole in the middle
+    // is refused - after it the archive no longer matches any coverage.
+    if (lod2) {
+        const uint32_t strm = seq_id < 0 ? 0 : seq_to_stream[seq_id];
+        const uint32_t used = v_cells[strm].used_max_p1();
+
+        if (p1 >= 0 && (uint32_t) p1 < used) {
+            return false;
+        }
+        // ...but only when the removal actually takes back columns the state
+        // absorbed.  The state covers [0, coverage); a suffix removal from p0
+        // touches [p0, used).  llama.cpp issues seq_rm(seq, n_past, -1) between
+        // ubatches as a no-op tidy-up - p0 == used, nothing to remove - and
+        // clearing on that made every ubatch rebuild the state from position
+        // zero.  That is where this port's O(N^2) prefill came from.
+        const uint32_t lo = p0 < 0 ? 0 : (uint32_t) p0;
+        if (seq_id < 0) {
+            for (uint32_t s = 0; s < n_stream; ++s) {
+                if (lo < lod2_coverage[s]) {
+                    clear_lod2_state_stream(s);
+                }
+            }
+        } else if (lo < lod2_coverage[strm]) {
+            clear_lod2_state_stream(strm);
         }
     }
 
@@ -1612,6 +1735,77 @@ ggml_tensor * llama_kv_cache::get_v_meanrows(ggml_context * ctx, int32_t il, uin
     auto * t = layers[map_layer_ids.at(il)].v_mean;
     GGML_ASSERT(t != nullptr && (int64_t) n <= t->ne[1]);
     return ggml_view_2d(ctx, t, t->ne[0], n, t->nb[1], strm*t->nb[2]);
+}
+
+// LoD2 state views: one stream's slice of the per-layer tables
+
+ggml_tensor * llama_kv_cache::get_lod2_s_kv(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].lod2_s_kv;
+    GGML_ASSERT(t != nullptr);
+    return ggml_view_3d(ctx, t, t->ne[0], t->ne[1], t->ne[2], t->nb[1], t->nb[2], strm*t->nb[3]);
+}
+
+ggml_tensor * llama_kv_cache::get_lod2_s_mn(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].lod2_s_mn;
+    GGML_ASSERT(t != nullptr);
+    return ggml_view_3d(ctx, t, t->ne[0], t->ne[1], t->ne[2], t->nb[1], t->nb[2], strm*t->nb[3]);
+}
+
+ggml_tensor * llama_kv_cache::get_lod2_p_kv(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].lod2_p_kv;
+    GGML_ASSERT(t != nullptr);
+    return ggml_view_3d(ctx, t, t->ne[0], t->ne[1], t->ne[2], t->nb[1], t->nb[2], strm*t->nb[3]);
+}
+
+ggml_tensor * llama_kv_cache::get_lod2_p_idx(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].lod2_p_idx;
+    GGML_ASSERT(t != nullptr);
+    return ggml_view_3d(ctx, t, t->ne[0], t->ne[1], t->ne[2], t->nb[1], t->nb[2], strm*t->nb[3]);
+}
+
+ggml_tensor * llama_kv_cache::get_lod2_s_pg(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].lod2_s_pg;
+    GGML_ASSERT(t != nullptr);
+    return ggml_view_3d(ctx, t, t->ne[0], t->ne[1], t->ne[2], t->nb[1], t->nb[2], strm*t->nb[3]);
+}
+
+ggml_tensor * llama_kv_cache::get_lod2_meta(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    auto * t = layers[map_layer_ids.at(il)].lod2_meta;
+    GGML_ASSERT(t != nullptr);
+    return ggml_view_2d(ctx, t, t->ne[0], t->ne[1], t->nb[1], strm*t->nb[2]);
+}
+
+// The archive is the cache itself.  The cache stores one column per token with
+// the heads interleaved; the ops want [D, column, head], which is that same
+// memory read with the two strides swapped - a view, not a copy.
+ggml_tensor * llama_kv_cache::get_lod2_k(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * k = layers[ikv].k;
+
+    const int64_t D          = hparams.n_embd_head_k(il);
+    const int64_t n_head_kv  = hparams.n_head_kv(il);
+    const int64_t n_embd_gqa = hparams.n_embd_k_gqa(il);
+
+    return ggml_view_3d(ctx, k, D, get_size(), n_head_kv,
+            ggml_row_size(k->type, n_embd_gqa),
+            ggml_row_size(k->type, D),
+            strm*k->nb[2]);
+}
+
+ggml_tensor * llama_kv_cache::get_lod2_v(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    const int32_t ikv = map_layer_ids.at(il);
+    auto * v = layers[ikv].v;
+
+    GGML_ASSERT(!v_trans); // LoD2 gathers single V rows, so V stays token-major
+
+    const int64_t D          = hparams.n_embd_head_v(il);
+    const int64_t n_head_kv  = hparams.n_head_kv(il);
+    const int64_t n_embd_gqa = hparams.n_embd_v_gqa(il);
+
+    return ggml_view_3d(ctx, v, D, get_size(), n_head_kv,
+            ggml_row_size(v->type, n_embd_gqa),
+            ggml_row_size(v->type, D),
+            strm*v->nb[2]);
 }
 
 bool llama_kv_cache::has_lod_means() const {
@@ -2953,6 +3147,58 @@ ggml_tensor * llama_kv_cache_context::get_v(ggml_context * ctx, int32_t il) cons
     return kv->get_v(ctx, il, n_kv, sinfos[i_cur]);
 }
 
+bool llama_kv_cache_context::is_lod2() const {
+    return kv->is_lod2();
+}
+
+const llama_lod2_params & llama_kv_cache_context::get_lod2_params() const {
+    return kv->get_lod2_params();
+}
+
+uint32_t llama_kv_cache_context::get_lod2_coverage() const {
+    return kv->get_lod2_coverage(get_stream());
+}
+
+uint32_t llama_kv_cache_context::get_lod2_slots() const {
+    return kv->get_lod2_slots(get_stream());
+}
+
+void llama_kv_cache_context::set_lod2_state(uint32_t coverage, uint32_t slots) const {
+    kv->set_lod2_state(get_stream(), coverage, slots);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_s_kv(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_s_kv(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_s_mn(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_s_mn(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_p_kv(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_p_kv(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_p_idx(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_p_idx(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_s_pg(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_s_pg(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_meta(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_meta(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_k(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_k(ctx, il, get_stream());
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_v(ggml_context * ctx, int32_t il) const {
+    return kv->get_lod2_v(ctx, il, get_stream());
+}
+
 bool llama_kv_cache_context::is_lod() const {
     return kv->is_lod();
 }
@@ -2969,6 +3215,89 @@ uint32_t llama_kv_cache_context::get_head() const {
     GGML_ASSERT(sinfo.is_contiguous());
 
     return sinfo.head();
+}
+
+uint32_t llama_kv_cache_context::get_lod2_n_groups() const {
+    return (uint32_t) sinfos[i_cur].n_stream();
+}
+
+uint32_t llama_kv_cache_context::get_lod2_group_stream(uint32_t g) const {
+    return (uint32_t) sinfos[i_cur].strm[g];
+}
+
+uint32_t llama_kv_cache_context::get_lod2_group_head(uint32_t g) const {
+    const auto & idxs = sinfos[i_cur].idxs[g];
+    GGML_ASSERT(!idxs.empty());
+    return idxs[0];
+}
+
+uint32_t llama_kv_cache_context::get_lod2_group_len(uint32_t g) const {
+    return (uint32_t) sinfos[i_cur].idxs[g].size();
+}
+
+// LoD2 reads the archive by position, so a group's cells have to be the
+// positions it is about to attend: appended, in order, from the group's head.
+bool llama_kv_cache_context::lod2_groups_contiguous() const {
+    const auto & sinfo = sinfos[i_cur];
+    if (sinfo.empty()) {
+        return true;
+    }
+    for (size_t g = 0; g < sinfo.idxs.size(); ++g) {
+        const auto & idxs = sinfo.idxs[g];
+        if (idxs.empty() || idxs.size() != sinfo.idxs[0].size()) {
+            return false;
+        }
+        for (size_t i = 0; i < idxs.size(); ++i) {
+            if (idxs[i] != idxs[0] + i) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+uint32_t llama_kv_cache_context::get_lod2_coverage(uint32_t strm) const {
+    return kv->get_lod2_coverage(strm);
+}
+
+uint32_t llama_kv_cache_context::get_lod2_slots(uint32_t strm) const {
+    return kv->get_lod2_slots(strm);
+}
+
+void llama_kv_cache_context::set_lod2_state(uint32_t strm, uint32_t coverage, uint32_t slots) const {
+    kv->set_lod2_state(strm, coverage, slots);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_s_kv(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_s_kv(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_s_mn(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_s_mn(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_p_kv(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_p_kv(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_p_idx(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_p_idx(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_s_pg(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_s_pg(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_meta(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_meta(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_k(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_k(ctx, il, strm);
+}
+
+ggml_tensor * llama_kv_cache_context::get_lod2_v(ggml_context * ctx, int32_t il, uint32_t strm) const {
+    return kv->get_lod2_v(ctx, il, strm);
 }
 
 bool llama_kv_cache_context::is_single_stream_contig() const {

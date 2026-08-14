@@ -575,6 +575,8 @@ extern "C" {
         GGML_OP_DSV4_HC_PRE,
         GGML_OP_DSV4_HC_POST,
         GGML_OP_LOD_ATTN,
+        GGML_OP_LOD2_UPDATE,
+        GGML_OP_LOD2_ATTN,
 
         GGML_OP_UNARY,
 
@@ -2629,6 +2631,73 @@ extern "C" {
         float                 scale,
         int                   n_top,
         bool                  sel_head); // in-op selection per KV head (else one shared set)
+
+    // LoD2 attention (ref. "Key-Value Means", arXiv:2605.09877)
+    //
+    // Unlike ggml_lod_attn, whose coarse layer is a fixed positional page
+    // hierarchy, LoD2's coarse layer is a set of content-addressed clusters
+    // ("slots").  Each history token belongs to exactly one slot; a slot keeps
+    // the sum of its members' K and V plus the member count, so its mean is
+    // recovered by division and merging is plain addition.
+    //
+    // Persistent state, packed so both ops fit inside GGML_MAX_SRC.  D is the
+    // key head size, Dv the value head size, ps the page size:
+    //
+    //   s_mn  [D + Dv,     S_cap, H_kv] F32  slot   mean_key | mean_value
+    //   s_kv  [D + Dv + 1, S_cap, H_kv] F32  slot   key_sum | value_sum | count
+    //   p_kv  [D + Dv + 1, P_cap, H_kv] F32  page   key_sum | value_sum | count
+    //   p_idx [ps,         P_cap, H_kv] I32  page lane -> k/v column, -1 empty
+    //   s_pg  [pps + 1,    S_cap, H_kv] I32  slot page list | slot_length at [pps]
+    //   meta  [4,          H_kv]        I32  next_page, reserved
+    //
+    // Both ops write into their state tensors in place and return a view of
+    // the tensor they mutate, so a consumer gets a real data dependency (the
+    // same contract as ggml_set_rows).
+
+    // absorb k/v columns [p0, p1) into the slot state and the page index.
+    // s_len is the live slot count before the call, s_len_new after it; both
+    // are functions of the position, so they are known when the graph is built.
+    GGML_API struct ggml_tensor * ggml_lod2_update(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * k,      // [D,  n_kv, H_kv]
+        struct ggml_tensor  * v,      // [Dv, n_kv, H_kv]
+        struct ggml_tensor  * s_kv,
+        struct ggml_tensor  * s_mn,
+        struct ggml_tensor  * p_kv,
+        struct ggml_tensor  * p_idx,
+        struct ggml_tensor  * s_pg,
+        struct ggml_tensor  * meta,
+        int                   p0,
+        int                   p1,
+        int                   s_len,
+        int                   s_len_new,
+        int                   sink_len);
+
+    // three branches (coarse slots / exact local window / routed leaf pages)
+    // merged by logsumexp.  Query i covers positions <= q0 + i; the local
+    // window starts at l0 and the slot state covers [0, l0).
+    //
+    // q0 arrives in a tensor rather than in op_params because it is the only
+    // thing that changes between two generated tokens: l0 and s_len only move
+    // when the state absorbs a block, which happens once per chunk.  Keeping it
+    // out of the params is what lets the graph be reused.
+    GGML_API struct ggml_tensor * ggml_lod2_attn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,      // [D,  n_tokens, n_head_q]
+        struct ggml_tensor  * k,      // [D,  n_kv, H_kv]
+        struct ggml_tensor  * v,      // [Dv, n_kv, H_kv]
+        struct ggml_tensor  * s_kv,
+        struct ggml_tensor  * s_mn,
+        struct ggml_tensor  * p_kv,
+        struct ggml_tensor  * p_idx,
+        struct ggml_tensor  * s_pg,
+        struct ggml_tensor  * meta,   // I32 [1] = q0, read at compute time
+        struct ggml_tensor  * logits, // F32 [s_len, n_tokens, n_head_q], q . mean_k
+        int                   l0,
+        int                   s_len,
+        int                   n_routes,
+        int                   sink_len,
+        float                 scale);  // res [Dv, n_head_q, n_tokens] F32 (as ggml_lod_attn)
 
     // DeepSeek V4 hyper-connections (ref. https://arxiv.org/pdf/2512.24880)
     // In short these operations are replacements for the original residual connection (x = transformer(x) + x)

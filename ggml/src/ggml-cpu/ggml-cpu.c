@@ -2068,6 +2068,14 @@ static void ggml_compute_forward(struct ggml_compute_params * params, struct ggm
             {
                 ggml_compute_forward_lod_attn(params, tensor);
             } break;
+        case GGML_OP_LOD2_UPDATE:
+            {
+                ggml_compute_forward_lod2_update(params, tensor);
+            } break;
+        case GGML_OP_LOD2_ATTN:
+            {
+                ggml_compute_forward_lod2_attn(params, tensor);
+            } break;
         case GGML_OP_DSV4_HC_COMB:
             {
                 ggml_compute_forward_dsv4_hc_comb(params, tensor);
@@ -2404,6 +2412,8 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_SSM_CONV:
         case GGML_OP_SSM_SCAN:
         case GGML_OP_LOD_ATTN:
+        case GGML_OP_LOD2_UPDATE:
+        case GGML_OP_LOD2_ATTN:
         case GGML_OP_LIGHTNING_INDEXER:
             {
                 n_tasks = n_threads;

@@ -287,7 +287,11 @@ int main(int argc, char ** argv) {
     // (gather), =2 profiles one 32-query block (mask granularity)
     setenv("LLAMA_LOD_PROFILE", want_union ? "3" : (granularity_block ? "2" : "1"), 1);
     unsetenv("LLAMA_LOD_TOP_PAGES_DECODE");
-    unsetenv("LLAMA_LOD_PREFILL");
+    if (probes_path.empty() && niah_spec.empty()) {
+        // profiling has to run on gather (it reports what a shared page set captures);
+        // scoring must not - it has to measure whatever mode the caller asked for
+        unsetenv("LLAMA_LOD_PREFILL");
+    }
 
     profile_collector collector;
     params.cb_eval           = profile_collector::cb;

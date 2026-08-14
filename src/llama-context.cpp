@@ -350,6 +350,75 @@ llama_context::llama_context(
         }
     }
 
+    // LoD2: content-addressed clusters instead of positional pages (docs/lod2-port-spec.md).
+    // env: LLAMA_LOD2, LLAMA_LOD2_ROUTES[_PREFILL], LLAMA_LOD2_LOCAL, LLAMA_LOD2_CHUNK,
+    //      LLAMA_LOD2_PAGE, LLAMA_LOD2_UPDATE, LLAMA_LOD2_GROWTH, LLAMA_LOD2_LAYERS
+    cparams.lod2 = getenv("LLAMA_LOD2") != nullptr;
+    if (cparams.lod2) {
+        if (cparams.lod) {
+            throw std::runtime_error("LoD and LoD2 are different engines - enable only one");
+        }
+
+        auto env_u32 = [](const char * name, uint32_t def) {
+            const char * v = getenv(name);
+            return v ? (uint32_t) std::max(1, atoi(v)) : def;
+        };
+
+        auto & p = cparams.lod2_p;
+
+        p.chunk_len      = env_u32("LLAMA_LOD2_CHUNK",   256);
+        p.local_len      = env_u32("LLAMA_LOD2_LOCAL",   512);
+        p.page_size      = env_u32("LLAMA_LOD2_PAGE",     16);
+        p.sink_len       = getenv("LLAMA_LOD2_SINK") ? (uint32_t) std::max(0, atoi(getenv("LLAMA_LOD2_SINK"))) : 1;
+        p.routes_decode  = env_u32("LLAMA_LOD2_ROUTES",    8);
+        p.routes_prefill = env_u32("LLAMA_LOD2_ROUTES_PREFILL", 3);
+        p.state_growth   = getenv("LLAMA_LOD2_GROWTH") ? (float) atof(getenv("LLAMA_LOD2_GROWTH")) : 16.0f;
+        p.state_min      = env_u32("LLAMA_LOD2_STATE_MIN", 256);
+        p.pages_per_slot = env_u32("LLAMA_LOD2_PAGES_PER_SLOT", 128);
+
+        // the prefill chunk IS the ubatch; the paper's operating point is
+        // -ub 4096, which gives its 4864-token prefill window exactly
+        p.prefill_chunk        = cparams.n_ubatch;
+        p.prefill_local        = p.prefill_chunk + p.local_len + p.chunk_len;
+        p.prefill_state_update = env_u32("LLAMA_LOD2_UPDATE", 5*p.chunk_len);
+        p.decode_state_update  = p.chunk_len;
+
+        if (p.local_len % p.chunk_len) {
+            throw std::runtime_error("LLAMA_LOD2_LOCAL must be a multiple of LLAMA_LOD2_CHUNK");
+        }
+
+        cparams.lod2_l.assign(model.hparams.n_layer(), true);
+        if (const char * spec = getenv("LLAMA_LOD2_LAYERS")) {
+            // "il,il,..." selects exactly those layers; every other layer stays dense
+            cparams.lod2_l.assign(model.hparams.n_layer(), false);
+            for (const char * s = spec; *s; ) {
+                const int il = atoi(s);
+                if (il >= 0 && il < (int) model.hparams.n_layer()) {
+                    cparams.lod2_l[il] = true;
+                }
+                const char * c = strchr(s, ',');
+                s = c ? c + 1 : s + strlen(s);
+            }
+        }
+
+        LLAMA_LOG_INFO("%s: LoD2 attention enabled: state = %.0f*sqrt(N) (min %u), local = %u, "
+                "page = %u, routes = %u (prefill %u), prefill chunk = %u, state update = %u\n",
+                __func__, (double) p.state_growth, p.state_min, p.local_len, p.page_size,
+                p.routes_decode, p.routes_prefill, p.prefill_chunk, p.prefill_state_update);
+
+        // LoD2 indexes the KV archive by position, and the cache indexes it by
+        // cell, so the two have to coincide.  One stream per sequence gives that
+        // - each sequence owns a contiguous, append-only stream and its head is
+        // its length.  A unified cache interleaves sequences in one cell space
+        // and breaks the identity, so that is the configuration to refuse; the
+        // state itself has been per-stream all along (s_kv and friends carry
+        // n_stream, and coverage/slots are per-stream vectors).
+        if (cparams.n_seq_max > 1 && params.kv_unified) {
+            throw std::runtime_error("LoD2 needs one KV stream per sequence: "
+                    "run without --kv-unified, or use -np 1");
+        }
+    }
+
     cparams.fused_gdn_ar = true;
     cparams.fused_gdn_ch = true;
     cparams.auto_fgdn    = true;

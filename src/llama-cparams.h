@@ -1,6 +1,7 @@
 #pragma once
 
 #include "llama.h"
+#include "llama-lod2.h"
 
 #include <cstdint>
 #include <vector>
@@ -65,6 +66,13 @@ struct llama_cparams {
     uint32_t lod_top_pages_dec;
     std::vector<uint32_t> lod_top_pages_dec_l;
     std::vector<uint32_t> lod_top_regions_dec_l;
+
+    // LoD2 content-addressed attention (env: LLAMA_LOD2*).  Unrelated to the
+    // LoD fields above: the two engines share nothing but the branch point in
+    // the model graphs, and enabling both at once is rejected.
+    bool              lod2;
+    llama_lod2_params lod2_p;
+    std::vector<bool> lod2_l; // per-layer enable
 
     bool warmup;             // TODO: remove [TAG_LLAMA_GRAPH_NO_WARMUP]
     bool op_offload;

@@ -3361,6 +3361,349 @@ ggml_tensor * llm_graph_context::build_attn(
     return cur;
 }
 
+void llm_graph_input_attn_lod2::set_input(const llama_ubatch * ubatch) {
+    mctx->set_input_k_idxs(self_k_idxs, ubatch);
+    mctx->set_input_v_idxs(self_v_idxs, ubatch);
+
+    std::vector<int32_t> meta(4*groups.size(), 0);
+
+    for (size_t i = 0; i < groups.size(); ++i) {
+        const auto & g = groups[i];
+
+        // the archive is indexed by cell, and LoD2 reads it by position, so the
+        // two must coincide: append only, no shift, within the group's stream
+        // (spec 8.5)
+        GGML_ASSERT((uint32_t) ubatch->pos[g.t0] == g.p0);
+
+        // and the group has to be exactly one sequence's run of queries, since
+        // its ops read that stream's archive and state
+        for (uint32_t t = 0; t < g.nt; ++t) {
+            const uint32_t j = g.t0 + t;
+            if (ubatch->n_seq_id[j] != 1 ||
+                ubatch->seq_id[j][0] != ubatch->seq_id[g.t0][0] ||
+                (uint32_t) ubatch->pos[j] != g.p0 + t) {
+                LLAMA_LOG_ERROR("lod2: group %zu strm=%u t0=%u nt=%u p0=%u : token %u "
+                        "n_seq_id=%d seq=%d pos=%d\n", i, g.strm, g.t0, g.nt, g.p0, j,
+                        ubatch->n_seq_id[j], ubatch->seq_id[j][0], ubatch->pos[j]);
+                GGML_ABORT("LoD2: ubatch group is not a single contiguous sequence");
+            }
+        }
+
+        meta[4*i] = (int32_t) g.p0;
+    }
+
+    if (lod2_meta && !groups.empty()) {
+        ggml_backend_tensor_set(lod2_meta, meta.data(), 0, meta.size()*sizeof(int32_t));
+    }
+
+    // The plan was decided when the graph was built; publishing it here means a
+    // graph that is reserved but never computed leaves the cache state alone.
+    for (const auto & g : groups) {
+        mctx->set_lod2_state(g.strm, g.coverage_post, g.slots_post);
+    }
+}
+
+bool llm_graph_input_attn_lod2::can_reuse(const llm_graph_params & params) {
+    // Off by default: two earlier attempts produced wrong output (see
+    // docs/lod2-port-handover.md).  LLAMA_LOD2_REUSE=1 turns it on and
+    // LLAMA_LOD2_REUSE=2 additionally traces every decision, because the
+    // failure mode reported so far - correct at -ub 512, no output at -ub 4096
+    // - is not something any check here looks at.
+    static const int reuse = getenv("LLAMA_LOD2_REUSE") ? atoi(getenv("LLAMA_LOD2_REUSE")) : 0;
+    if (reuse == 0) {
+        return false;
+    }
+
+    const auto * base = static_cast<const llama_memory_hybrid_context *>(params.mctx)->get_attn();
+
+    const uint32_t p0_new = base->get_head();
+    const uint32_t p1_new = p0_new + params.ubatch.n_tokens;
+    const uint32_t cov    = base->get_lod2_coverage();
+    const uint32_t slots  = base->get_lod2_slots();
+
+    const auto & p = base->get_lod2_params();
+    const uint32_t target = params.ubatch.n_tokens > 1
+        ? p.local_begin(p0_new)
+        : p.decode_begin(p1_new);
+
+    const char * why = nullptr;
+    if (groups.size() != 1)                          { why = "multi-group";    }
+    else if (!base->is_single_stream_contig())       { why = "multi-stream";   }
+    else if (params.ubatch.n_tokens != p1 - p0)      { why = "width";          }
+    else if (cov != groups[0].coverage_post)         { why = "coverage";       }
+    else if (slots != groups[0].slots_post)          { why = "slots";          }
+    else if (target != cov)                          { why = "update due";     }
+
+    if (reuse > 1) {
+        LLAMA_LOG_INFO("lod2 reuse: n_tok=%u p0 %u->%u cov=%u/%u slots=%u/%u target=%u : %s\n",
+                params.ubatch.n_tokens, p0, p0_new, cov,
+                groups.empty() ? 0 : groups[0].coverage_post,
+                slots, groups.empty() ? 0 : groups[0].slots_post,
+                target, why ? why : "REUSE");
+    }
+
+    if (why) {
+        return false;
+    }
+
+    p0   = p0_new;
+    p1   = p1_new;
+    groups[0].p0 = p0_new;
+    groups[0].p1 = p1_new;
+    mctx = base;
+
+    return true;
+}
+
+llm_graph_input_attn_lod2 * llm_graph_context::build_attn_inp_lod2(const llama_kv_cache_context * mctx_base) const {
+    GGML_ASSERT(mctx_base->is_lod2());
+
+    // Every group has to be an append-only run of cells, because LoD2 indexes
+    // the archive by position.  Groups themselves are fine: with one KV stream
+    // per sequence they are separate archives that share nothing.
+    if (!mctx_base->lod2_groups_contiguous()) {
+        return nullptr;
+    }
+
+    auto inp = std::make_unique<llm_graph_input_attn_lod2>(cparams, mctx_base);
+
+    const uint32_t ng = mctx_base->get_lod2_n_groups();
+
+    // Group widths come from the cell lists when they describe this ubatch.
+    // The context that graph_reserve builds carries a dummy slot info of one
+    // cell per stream whatever the reserve ubatch is; that graph is only ever
+    // measured, never computed, so there the tokens are divided evenly and the
+    // state is taken as empty.  Reading the live coverage against the dummy's
+    // p0 of zero is what it would otherwise do, and an empty state is also the
+    // widest plan, which is what a reservation wants.
+    uint32_t n_cells = 0;
+    for (uint32_t i = 0; i < ng; ++i) {
+        n_cells += mctx_base->get_lod2_group_len(i);
+    }
+    const bool real = ng > 0 && n_cells == n_tokens;
+
+    uint32_t t0 = 0;
+    for (uint32_t i = 0; i < ng; ++i) {
+        llm_graph_input_attn_lod2::group g;
+
+        g.strm = mctx_base->get_lod2_group_stream(i);
+        g.t0   = t0;
+        g.nt   = real ? mctx_base->get_lod2_group_len(i)
+                      : (i + 1 == ng ? n_tokens - t0 : n_tokens/ng);
+        g.p0   = real ? mctx_base->get_lod2_group_head(i) : 0;
+        g.p1   = g.p0 + g.nt;
+
+        g.coverage_pre  = real ? mctx_base->get_lod2_coverage(g.strm) : 0;
+        g.slots_pre     = real ? mctx_base->get_lod2_slots   (g.strm) : 0;
+        g.coverage_post = g.coverage_pre;
+        g.slots_post    = g.slots_pre;
+
+        t0 += g.nt;
+
+        inp->groups.push_back(g);
+    }
+    GGML_ASSERT(t0 == n_tokens);
+
+    inp->p0 = inp->groups.empty() ? 0 : inp->groups[0].p0;
+    inp->p1 = inp->p0 + (inp->groups.empty() ? 0 : inp->groups[0].nt);
+
+    inp->self_k_idxs = mctx_base->build_input_k_idxs(ctx0, ubatch);
+    inp->self_v_idxs = mctx_base->build_input_v_idxs(ctx0, ubatch);
+
+    // one meta tensor for every layer: the schedule is per sequence, not per
+    // layer, so it holds one entry per group
+    inp->lod2_meta = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 4, std::max<int64_t>(1, ng));
+    ggml_set_input(inp->lod2_meta);
+    ggml_set_name(inp->lod2_meta, "lod2_meta");
+
+    return (llm_graph_input_attn_lod2 *) res->add_input(std::move(inp));
+}
+
+ggml_tensor * llm_graph_context::build_attn(
+        llm_graph_input_attn_lod2 * inp,
+        ggml_tensor * wo,
+        ggml_tensor * wo_b,
+        ggml_tensor * wo_s,
+        ggml_tensor * q_cur,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+        ggml_tensor * kq_b,
+        ggml_tensor * sinks,
+        ggml_tensor * v_mla,
+            float     kq_scale,
+            int       il) const {
+    GGML_ASSERT(kq_b  == nullptr && "LoD2 does not support KQ bias");
+    GGML_ASSERT(sinks == nullptr && "LoD2 does not support sinks");
+    GGML_ASSERT(v_mla == nullptr);
+
+    ggml_build_forward_expand(gf, q_cur);
+    ggml_build_forward_expand(gf, k_cur);
+    ggml_build_forward_expand(gf, v_cur);
+
+    const auto * mctx_cur = inp->mctx;
+
+    // the archive is the cache: write this ubatch before anything reads it
+    ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, inp->get_k_idxs(), il));
+    ggml_build_forward_expand(gf, mctx_cur->cpy_v(ctx0, v_cur, inp->get_v_idxs(), il));
+
+    const auto & p = mctx_cur->get_lod2_params();
+
+    // q as the op wants it: [D, n_tokens, n_head_q]
+    ggml_tensor * q_all = ggml_permute(ctx0, q_cur, 0, 2, 1, 3);
+
+    const size_t ng = inp->groups.size();
+    GGML_ASSERT(ng > 0);
+
+    ggml_tensor * cur = nullptr;
+
+    // One chain per group.  The groups write disjoint state planes and read
+    // disjoint archives, so nothing orders them against each other; only the
+    // updates within a group are chained.
+    for (size_t gi = 0; gi < ng; ++gi) {
+        auto & G = inp->groups[gi];
+
+        const uint32_t p0 = G.p0;
+        const uint32_t p1 = G.p1;
+
+        ggml_tensor * k     = mctx_cur->get_lod2_k    (ctx0, il, G.strm);
+        ggml_tensor * v     = mctx_cur->get_lod2_v    (ctx0, il, G.strm);
+        ggml_tensor * s_kv  = mctx_cur->get_lod2_s_kv (ctx0, il, G.strm);
+        ggml_tensor * s_mn  = mctx_cur->get_lod2_s_mn (ctx0, il, G.strm);
+        ggml_tensor * p_kv  = mctx_cur->get_lod2_p_kv (ctx0, il, G.strm);
+        ggml_tensor * p_idx = mctx_cur->get_lod2_p_idx(ctx0, il, G.strm);
+        ggml_tensor * s_pg  = mctx_cur->get_lod2_s_pg (ctx0, il, G.strm);
+        ggml_tensor * meta  = mctx_cur->get_lod2_meta (ctx0, il, G.strm);
+
+        ggml_tensor * q = q_all;
+        if (ng > 1) {
+            q = ggml_cont(ctx0, ggml_view_3d(ctx0, q_all,
+                    q_all->ne[0], G.nt, q_all->ne[2],
+                    q_all->nb[1], q_all->nb[2], (size_t) G.t0*q_all->nb[1]));
+        }
+
+        uint32_t coverage = G.coverage_pre;
+        uint32_t slots    = G.slots_pre;
+
+        // Chaining each update's result into the next op's state src is what
+        // orders the nodes: they all write the same buffers, so without the
+        // dependency the scheduler would be free to interleave them.
+        ggml_tensor * state = s_kv;
+
+        const auto emit_updates = [&](const std::vector<llama_lod2_block> & blocks) {
+            for (const auto & b : blocks) {
+                state = ggml_lod2_update(ctx0, k, v, state, s_mn, p_kv, p_idx, s_pg, meta,
+                        b.p0, b.p1, b.s_len, b.s_len_new, p.sink_len);
+                ggml_build_forward_expand(gf, state);
+
+                coverage = b.p1;
+                slots    = b.s_len_new;
+            }
+        };
+
+        // Absorb everything this group will not read exactly.  Prefill measures
+        // the window from the group start with the prefill lookback; generation
+        // uses the smaller decode window.  The two schedules differ in step size
+        // and in the context the growth budget is measured against
+        // (spec 4, 6.1, 6.2).
+        if (G.nt > 1) {
+            // Padded to a fixed length so that the node count of this graph does
+            // not depend on where the schedule happens to land.  A varying node
+            // count makes ggml_gallocr reallocate every ubatch, and the
+            // reallocation path synchronizes every backend - which drains the
+            // scheduler's pipeline and is why this path used to get no multi-GPU
+            // prefill scaling at all.  The padding blocks are empty (p0 == p1)
+            // and every backend skips them.  The bound is taken from the ubatch
+            // size, not from this group's token count: a group advances coverage
+            // by however many tokens the PREVIOUS one carried, so a short tail
+            // still has to schedule a full one's worth of blocks.  A plan longer
+            // than the bound is left unpadded rather than refused - it costs one
+            // reallocation, not correctness.
+            auto blocks = llama_lod2_plan_prefill(p, coverage, slots, p.local_begin(p0));
+            const size_t want = p.prefill_blocks_max(p.prefill_chunk);
+            while (blocks.size() < want) {
+                const uint32_t c = blocks.empty() ? coverage : blocks.back().p1;
+                const uint32_t sl = blocks.empty() ? slots   : blocks.back().s_len_new;
+                blocks.push_back({ c, c, sl, sl });
+            }
+            emit_updates(blocks);
+        } else {
+            emit_updates(llama_lod2_plan_tail(p, coverage, slots,
+                        p.decode_begin(p1), p1, p.decode_state_update));
+        }
+
+        // The exact window starts exactly where the state ends: the two branches
+        // partition the history, so any other boundary would drop or double count
+        // tokens.  This is the invariant, not the planned target.
+        const uint32_t l0 = coverage;
+        if (l0 > p0) {
+            LLAMA_LOG_ERROR("lod2: state ahead of queries: il=%d group %zu/%zu strm=%u "
+                    "t0=%u nt=%u p0=%u p1=%u cov_pre=%u slots_pre=%u l0=%u slots=%u n_tokens=%u\n",
+                    il, gi, ng, G.strm, G.t0, G.nt, p0, p1,
+                    G.coverage_pre, G.slots_pre, l0, slots, n_tokens);
+        }
+        GGML_ASSERT(l0 <= p0 && "LoD2 state ran ahead of the queries");
+
+        const uint32_t routes = G.nt > 1 ? p.routes_prefill : p.routes_decode;
+
+        // The routing logits are q . mean_k for every live slot.  That
+        // contraction is the dominant cost of prefill and it is a GEMM: handing
+        // it to ggml_mul_mat puts it on the matrix units instead of a per-query
+        // loop, which is exactly what the author's Triton path does (it passes
+        // finished route logits into its fused kernel).  The mean table is
+        // copied to a compact [D, slots, H_kv] first: one small copy per layer,
+        // against a strided src0 that the backends would rather not see.
+        //
+        // Generation is the opposite case.  With one query the GEMM degenerates
+        // to a GEMV that reads the mean table once per query head, and the copy
+        // that feeds it costs a read plus a write of the whole table - together
+        // 0.98 ms per token against the 0.09 ms the traffic is worth.  The op
+        // reads the table once per KV head instead, so the whole pair comes out
+        // of the graph.
+        //
+        // The view is taken at the full slot capacity rather than at the live
+        // slot count, even though only the first 'slots' columns are ever read.
+        // A view that grows with the state makes this GEMM's operands larger
+        // every ubatch, which takes them past what graph_reserve sized (slots is
+        // 0 there) and forces a graph reallocation - the same pipeline drain the
+        // block padding above avoids.  Every consumer already takes the slot
+        // count as an op parameter and the row stride as lgt->ne[0], so nothing
+        // else changes.
+        ggml_tensor * logits = nullptr;
+        if (G.nt > 1) {
+            ggml_tensor * mk = ggml_view_3d(ctx0, s_mn,
+                    k->ne[0], s_mn->ne[1], s_mn->ne[2], s_mn->nb[1], s_mn->nb[2], 0);
+            logits = ggml_mul_mat(ctx0, ggml_cont(ctx0, mk), q); // [S_cap, nt, n_head_q]
+        }
+
+        ggml_tensor * gmeta = inp->lod2_meta;
+        if (ng > 1) {
+            gmeta = ggml_view_1d(ctx0, inp->lod2_meta, 4, (size_t) gi*inp->lod2_meta->nb[1]);
+        }
+
+        ggml_tensor * out = ggml_lod2_attn(ctx0, q, k, v, state, s_mn, p_kv, p_idx, s_pg,
+                gmeta, logits, l0, slots, routes, p.sink_len, kq_scale);
+        ggml_build_forward_expand(gf, out);
+
+        G.coverage_post = coverage;
+        G.slots_post    = slots;
+
+        // the op returns [Dv, n_head_q, nt], so the groups stack along dim 2
+        cur = cur ? ggml_concat(ctx0, cur, out, 2) : out;
+    }
+
+    cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], n_tokens);
+    cb(cur, "kqv_out_lod2", il);
+
+    if (wo) {
+        cur = build_lora_mm(wo, cur, wo_s);
+    }
+    if (wo_b) {
+        cur = ggml_add(ctx0, cur, wo_b);
+    }
+
+    return cur;
+}
+
 llm_graph_input_attn_lod * llm_graph_context::build_attn_inp_lod(const llama_kv_cache_context * mctx_base, llm_graph_input_attn_lod::lod_parent_t parent) const {
     GGML_ASSERT(mctx_base->is_lod());
     GGML_ASSERT(cparams.lod_top_pages > 0);

@@ -28,6 +28,7 @@
 #include "ggml-cuda/fwht.cuh"
 #include "ggml-cuda/getrows.cuh"
 #include "ggml-cuda/im2col.cuh"
+#include "ggml-cuda/lod2.cuh"
 #include "ggml-cuda/mmf.cuh"
 #include "ggml-cuda/mmq.cuh"
 #include "ggml-cuda/mmvf.cuh"
@@ -2367,6 +2368,12 @@ static bool ggml_cuda_compute_forward(ggml_backend_cuda_context & ctx, struct gg
             break;
         case GGML_OP_LOD_ATTN:
             ggml_cuda_lod_attn(ctx, dst);
+            break;
+        case GGML_OP_LOD2_UPDATE:
+            ggml_cuda_lod2_update(ctx, dst);
+            break;
+        case GGML_OP_LOD2_ATTN:
+            ggml_cuda_lod2_attn(ctx, dst);
             break;
         default:
             return false;
@@ -5267,6 +5274,9 @@ static bool ggml_backend_cuda_device_supports_op(ggml_backend_dev_t dev, const g
             return ggml_cuda_lightning_indexer_supported(dev_ctx->device, op);
         case GGML_OP_LOD_ATTN:
             return ggml_cuda_lod_attn_supported(op);
+        case GGML_OP_LOD2_UPDATE:
+        case GGML_OP_LOD2_ATTN:
+            return ggml_cuda_lod2_supported(op);
 
         default:
             return false;

@@ -2,6 +2,7 @@
 
 #include "llama-batch.h"
 #include "llama-graph.h"
+#include "llama-lod2.h"
 #include "llama-kv-cells.h"
 #include "llama-memory.h"
 
@@ -161,8 +162,30 @@ public:
     // LoD (level-of-detail) index over full-attention layers (env: LLAMA_LOD)
     // per-layer page-sum tensors at KV-head resolution, used for sparse reads
     bool     is_lod() const { return lod_page_size > 0; }
+
+    bool     is_lod2() const { return lod2; }
+    const llama_lod2_params & get_lod2_params() const { return lod2_p; }
+    uint32_t get_lod2_coverage(uint32_t strm) const { return lod2_coverage[strm]; }
+    uint32_t get_lod2_slots   (uint32_t strm) const { return lod2_slots[strm]; }
+    void     set_lod2_state(uint32_t strm, uint32_t coverage, uint32_t slots) {
+        lod2_coverage[strm] = coverage;
+        lod2_slots   [strm] = slots;
+    }
+    // views of the per-layer LoD2 state for one stream; the ops write into them
+    ggml_tensor * get_lod2_s_kv (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_s_mn (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_p_kv (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_p_idx(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_s_pg (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_meta (ggml_context * ctx, int32_t il, uint32_t strm) const;
+
+    // the archive as the ops want it: [D, kv_size, n_head_kv] for one stream
+    ggml_tensor * get_lod2_k(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_v(ggml_context * ctx, int32_t il, uint32_t strm) const;
     uint32_t get_lod_page_size() const { return lod_page_size; }
     void     clear_lod_sums();
+    void     clear_lod2_state();
+    void     clear_lod2_state_stream(uint32_t strm);
     void     lod_truncate_sums(uint32_t p0, uint32_t strm);
     void     lod_zero_sums(uint32_t p_lo, uint32_t p_hi, uint32_t strm);
     // debug (LLAMA_LOD_CHECK=1): recompute every complete page sum from the cache rows
@@ -278,12 +301,28 @@ private:
         // LoD page means in cache precision (mask-direct prefill), null when off
         ggml_tensor * k_mean = nullptr;
         ggml_tensor * v_mean = nullptr;
+
+        // LoD2 content-addressed state, null when off (docs/lod2-port-spec.md 8.1)
+        ggml_tensor * lod2_s_kv  = nullptr;
+        ggml_tensor * lod2_s_mn  = nullptr;
+        ggml_tensor * lod2_p_kv  = nullptr;
+        ggml_tensor * lod2_p_idx = nullptr;
+        ggml_tensor * lod2_s_pg  = nullptr;
+        ggml_tensor * lod2_meta  = nullptr;
     };
 
     bool v_trans = true;  // the value tensor is transposed
 
     // LoD page size (0 = disabled); when enabled the V cache is kept non-transposed
     uint32_t lod_page_size = 0;
+
+    // LoD2 (0 = disabled). Its schedule state is host side: the block boundaries
+    // are clamped at each ubatch end, so coverage is not a function of position
+    // alone and cannot be recomputed from scratch when a graph is reused.
+    bool              lod2 = false;
+    llama_lod2_params lod2_p;
+    std::vector<uint32_t> lod2_coverage; // archive columns absorbed into the state
+    std::vector<uint32_t> lod2_slots;    // live slots
 
     // per-stream position up to which the page sums have been folded (lazy catch-up)
     std::vector<uint32_t> lod_sums_pos;
@@ -423,6 +462,42 @@ public:
     // get views of the current state of the cache
     ggml_tensor * get_k(ggml_context * ctx, int32_t il) const;
     ggml_tensor * get_v(ggml_context * ctx, int32_t il) const;
+
+    // LoD2 API (see llama_kv_cache)
+    bool     is_lod2() const;
+    const llama_lod2_params & get_lod2_params() const;
+    uint32_t get_lod2_coverage() const;
+    uint32_t get_lod2_slots() const;
+    void     set_lod2_state(uint32_t coverage, uint32_t slots) const;
+    ggml_tensor * get_lod2_s_kv (ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_s_mn (ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_p_kv (ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_p_idx(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_s_pg (ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_meta (ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_k(ggml_context * ctx, int32_t il) const;
+    ggml_tensor * get_lod2_v(ggml_context * ctx, int32_t il) const;
+
+    // Per-stream form of the same, for a ubatch that carries several sequences.
+    // llama_batch_allocr::split_equal concatenates the sequence sets, so such a
+    // ubatch is a run of equal-length groups, each of one stream and its own
+    // LoD2 state.
+    uint32_t get_lod2_n_groups() const;
+    uint32_t get_lod2_group_stream(uint32_t g) const;
+    uint32_t get_lod2_group_head  (uint32_t g) const;
+    uint32_t get_lod2_group_len   (uint32_t g) const;
+    bool     lod2_groups_contiguous() const;
+    uint32_t get_lod2_coverage(uint32_t strm) const;
+    uint32_t get_lod2_slots   (uint32_t strm) const;
+    void     set_lod2_state(uint32_t strm, uint32_t coverage, uint32_t slots) const;
+    ggml_tensor * get_lod2_s_kv (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_s_mn (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_p_kv (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_p_idx(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_s_pg (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_meta (ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_k(ggml_context * ctx, int32_t il, uint32_t strm) const;
+    ggml_tensor * get_lod2_v(ggml_context * ctx, int32_t il, uint32_t strm) const;
 
     // LoD API (see llama_kv_cache)
     bool     is_lod() const;

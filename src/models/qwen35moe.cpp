@@ -183,6 +183,13 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
         inp_lod = build_attn_inp_lod(mctx_h->get_attn(), llm_graph_input_attn_lod::LOD_PARENT_HYBRID);
     }
 
+    // LoD2 content-addressed read for the full-attention layers
+    llm_graph_input_attn_lod2 * inp_lod2 = nullptr;
+    if (cparams.lod2) {
+        const auto * mctx_h = static_cast<const llama_memory_hybrid_context *>(mctx);
+        inp_lod2 = build_attn_inp_lod2(mctx_h->get_attn());
+    }
+
     ggml_tensor * inp_pos     = build_inp_pos();
     ggml_tensor * inp_out_ids = build_inp_out_ids();
 
@@ -203,7 +210,7 @@ llama_model_qwen35moe::graph::graph(const llama_model & model, const llm_graph_p
             cur = build_layer_attn_linear(inp->get_recr(), cur, il);
         } else {
             // Full attention layer
-            cur = build_layer_attn(inp->get_attn(), inp_lod, cur, inp_pos, sections, il);
+            cur = build_layer_attn(inp->get_attn(), inp_lod, inp_lod2, cur, inp_pos, sections, il);
         }
 
         if (il == n_layer - 1 && inp_out_ids && cparams.embeddings_nextn_masked) {
@@ -290,6 +297,7 @@ ggml_tensor * llama_model_qwen35moe::graph::build_norm_gated(
 ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn(
         llm_graph_input_attn_kv *  inp,
         llm_graph_input_attn_lod * inp_lod,
+        llm_graph_input_attn_lod2 * inp_lod2,
         ggml_tensor *              cur,
         ggml_tensor *              inp_pos,
         int *                      sections,
@@ -352,7 +360,11 @@ ggml_tensor * llama_model_qwen35moe::graph::build_layer_attn(
     // Attention computation
     const float kq_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
 
-    if (inp_lod && cparams.lod_top_pages_l[il] > 0) {
+    if (inp_lod2 && cparams.lod2_l[il]) {
+        cur = build_attn(inp_lod2,
+                    nullptr, nullptr, nullptr,
+                    Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);
+    } else if (inp_lod && cparams.lod_top_pages_l[il] > 0) {
         cur = build_attn(inp_lod,
                     nullptr, nullptr, nullptr,
                     Qcur, Kcur, Vcur, nullptr, nullptr, nullptr, kq_scale, il);

@@ -155,115 +155,14 @@ prefill ~26k tokens, then decode one token.
 
 `--niah file=value,...` prefills each needle document, checks whether greedy decoding emits
 the planted value, and returns the pass count (ties inside a tier broken by the log-prob of
-the wanted string). Validated on gemma4-31B with six documents at 26.5k tokens: 0/6 at
-top 8, 2/6 at top 32, 5/6 at top 128 - monotonic in the budget, which is the property a
-search needs. Cost is ~2.5 min per candidate (six full prefills), so budget the run.
+the wanted string). The asset now carries ALL TWELVE planted keys - it was six while this
+was being built, and every conclusion drawn on the six-document scale had to be withdrawn
+(2c). Cost is ~2 min per candidate at twelve documents; do not trim it to save time, the
+resolution is the whole point.
 
-Portability: RESOLVED, one code path for both families. gemma4-31B gives 0/6, 1/6, 4/6 and
-qwen3.6-27B gives 2/6, 4/6, 6/6 for top 8/32/128 - both monotonic. Three generic fixes were
-needed, and it is worth knowing all three because each one silently produced a plausible
-wrong number first:
-1. `setenv("LLAMA_LOD_FUSED", "1")` - `--lod` does this, setting `LLAMA_LOD` alone does not,
-   so the tool was measuring (and crashing on) the composed decode path nobody runs.
-2. positions from `llama_memory_seq_pos_max()`, never from the token count - M-RoPE (qwen)
-   advances position faster than one per token.
-3. no rewind-and-replay - M-RoPE requires each batch to start after the stored max position,
-   so the "rewind and teacher-force" pattern cannot work there at all. One forward pass per
-   document; read pass/fail and the tie-break out of it.
-An exact-greedy-match rule was tried and rejected: fine on gemma4, flat on qwen3.6 because
-of answer phrasing. Model-specific rules disguised as metrics are the recurring failure in
-this whole line of work.
-
-Result on qwen3.6-27B (16 LoD layers, uniform 32 = 512 pages): the sensitivity signal is
-strong - layer 19 costs 2 documents, 31 and 11 cost 1 each, and layers 3/7/23 score NEGATIVE
-(starving them GAINS a document). At 512 pages the searched split wins mk3 (2/3 vs 1/3),
-loses coverage (11/12 vs 12/12) and ties the needle count - no clear gain. The reason is
-budget, not shape: at 512 pages the peaks and the floor compete (floor 8 -> coverage 11/12
-needle 4/6; floor 24 -> coverage 12/12 needle 2/6). Give it both - peaks 128 on 11/19/31
-with a floor of 24, 696 pages - and it reaches needle 5/6, coverage 12/12, mk3 2/3, against
-3/6 for the equal-cost uniform 44 (704 pages) and matching uniform 64 (1024 pages) on every
-metric: 32% cheaper at equal quality. Lesson: a search run below the budget where peaks and
-floor stop competing measures the competition, not the allocation.
-
-HARNESS BUG found here and fixed: lod-needle-mk3.sh generated 8 tokens by default, and
-qwen3.6 opens a thinking block on this prompt (`--reasoning-budget 0` is inert because
--no-cnv means no chat template). Every configuration including DENSE scored 0/3, which I
-first read as "mk3 does not work on qwen" and used to justify a "keep uniform" verdict. At
-MK3_N=256 the rows separate: dense 3/3, top32 1/3, searched 2/3, top128 3/3 - i.e. qwen
-really does lose retrieval at top32 and recover at top128, which was invisible before. The
-default is now 256 (and the output window 4000 bytes). A benchmark that returns the same
-number for every configuration is a broken instrument, not a result - check dense first.
-
-Two operational notes that cost hours here, both mine rather than the code's:
-- Always `stdbuf -oL` or redirect to a file. A pipe into `sed`/`grep` block-buffers, and a
-  perfectly healthy run then shows no output for minutes and looks hung.
-- Do not pre-create cancel markers in `~/.cluster-run/*/cancel/` for job ids you guessed:
-  the runner reuses ids, and a stale marker kills the next job instantly. Several "crashes"
-  in this work were that, plus my own `kill`s (the job logs show `exit_code=143 signal=15`,
-  i.e. TERM from outside, not an abort).
-
-What it found, and what did NOT survive. The per-layer sensitivity is real and repeats:
-on gemma4 layers 11/29/23 carry the retrieval and 5/17/47/53 cost nothing to starve; on
-qwen3.6 layer 19 costs two documents, 11 and 31 one each, and layers 3/7/23 score NEGATIVE
-(starving them GAINS one). Driven by that, the search concentrates the budget as intended.
-
-But on the 12-document needle set the resulting allocations tie or lose against a flat
-budget of the same size, on BOTH models:
-
-    gemma4-31B  (320 pages)   uniform 32       needle  3/12   coverage 11/12
-                              searched         needle  3/12   coverage 12/12
-    qwen3.6-27B               uniform 32  512p needle  8/12
-                              shaped      696p needle  8/12
-                              uniform 44  704p needle  7/12
-                              uniform 64 1024p needle 10/12
-                              shaped     1200p needle 10/12
-                              shaped     1600p needle 11/12
-                              uniform128 2048p needle 12/12
-
-Per page uniform is at least as good everywhere measured. The wins reported earlier in this
-work (gemma "coverage 11/12 -> 12/12, needle 2/6 -> 4/6", qwen "32% fewer pages at equal
-quality") were measured on a SIX-document needle set and did not survive widening it to
-twelve. The asset now defaults to all twelve keys; do not cut it back to save runtime.
-
-Score card for the whole line of work, because the pattern is the lesson: attention-mass
-capture claimed a win, lost on repeats (9.33 vs 10.50 of 12). Retrieval log-probability
-claimed a win, lost on coverage (2/12). Needle-6 claimed a win, lost at needle-12. Three
-proxies, three apparent wins, none survived a finer measurement. If a fourth attempt is
-made, fix the measurement resolution FIRST and decide the acceptance threshold before
-looking at the numbers.
-
-## 2d. BUG - the COMPOSED decode path asserts (LLAMA_LOD_FUSED unset)
-
-Found while building the needle objective into `llama-lod-search`, and initially
-misdiagnosed by me as a "2..8 token batch" problem - it is not about the batch size.
-
-A decode graph built with `kP > 0`, `use_fa == 0` and `use_fused == 0` aborts in
-`build_attn(llm_graph_input_attn_lod*, ...)` with
-`GGML_ASSERT(ggml_nelements(a) == ne0*ne1*ne2*ne3)`. Exact failing geometry, from
-`LLAMA_LOD_DBG_SHAPES=1` (added for this, prints one line per layer per graph so the last
-line before an abort names the failing case):
-
-    il=5 n_tokens=1 prev_end=26582 P_full=415 P_cap=512 kP=32 n_exact=65 catchup=0 fa=0 fused=0
-
-Nobody sees this in normal use because `--lod` sets `LLAMA_LOD_FUSED=1`, so decode takes the
-fused kernel. It bites anything that enables LoD by setting `LLAMA_LOD` directly (as this
-tool did) and anyone running the documented `--lod-fused 0` ablation with a real generation
-after a long prompt. The composed read is supposed to be the reference path, so this is
-worth fixing rather than papering over.
-
-Reproduce: `LLAMA_LOD=1 LLAMA_LOD_TOP_PAGES=32` (deliberately WITHOUT `LLAMA_LOD_FUSED`),
-prefill ~26k tokens, then decode one token.
-
-## 2e. `--niah` - the end-to-end needle objective
-
-`--niah file=value,...` prefills each needle document, checks whether greedy decoding emits
-the planted value, and returns the pass count (ties inside a tier broken by the log-prob of
-the wanted string). Validated on gemma4-31B with six documents at 26.5k tokens: 0/6 at
-top 8, 2/6 at top 32, 5/6 at top 128 - monotonic in the budget, which is the property a
-search needs. Cost is ~2.5 min per candidate (six full prefills), so budget the run.
-
-Portability: RESOLVED, one code path for both families. gemma4-31B gives 0/6, 1/6, 4/6 and
-qwen3.6-27B gives 2/6, 4/6, 6/6 for top 8/32/128 - both monotonic. Three generic fixes were
+Portability: RESOLVED, one code path for both families. On the twelve-document set
+gemma4-31B gives 3/12 at top 32 and 6/12 at top 128; qwen3.6-27B gives 8/12, 10/12 and
+12/12 at top 32/64/128, reaching dense (12/12) while reading 31% of the context. Three generic fixes were
 needed, and it is worth knowing all three because each one silently produced a plausible
 wrong number first:
 1. `setenv("LLAMA_LOD_FUSED", "1")` - `--lod` does this, setting `LLAMA_LOD` alone does not,
@@ -351,6 +250,68 @@ page in that region. mask (per 32-query block) does not have the failure.
 This explains a large part of the measurement noise in sections 2c-2e: a coverage difference
 of 1 in 12 between two configurations is far inside the swing caused by moving the budget by
 8 pages per layer. Any tuning done on gather needs a sweep, not a point measurement.
+
+## 2g. stratified page selection - implemented, measured, REVERTED
+
+Response to 2f: replace the global top-k with "best kP/r pages inside each of r slices of the
+page axis". Same pages read, no shape change (static graph and its reuse unaffected), no
+measurable throughput cost (2605/2495 t/s at r=1 against 2538/2596 at r=2).
+
+    gemma4-31B 24k        r=1        r=2        r=4
+    coverage top 48        7/12      12/12       6/12
+    coverage top 56        7/12      12/12      12/12
+    needle/12 top 32         3/12       3/12       1/12
+    needle/12 top 64         4/12       2/12       1/12
+
+Fixes the coverage hole, costs needle monotonically in r. Reverted: the point of touching
+gather was to move it TOWARDS mask's needle behaviour, and this moves the other way. The code
+is gone; keep the numbers so it is not rebuilt.
+
+Implementation note if something similar is ever attempted: `ggml_add`/`ggml_cast` on I32
+index tensors silently produce garbage (first attempt scored 0/12 everywhere). The working
+form keeps the top-k indices slice-local and resolves them with a batched `ggml_get_rows`
+over a slice-shaped view of the page rows - no index arithmetic at all.
+
+## 2h. why gather cannot cheaply reach mask's needle quality (MEASURED)
+
+The gap: gemma4-31B needle on 12 documents, gather 3/12, 4/12, 6/12 at top 32/64/128 against
+mask 3/12, 10/12, 12/12. mask matches dense at top 128 and reaches 10/12 at top 64 where
+gather needs top 256.
+
+The cause is entirely query granularity, established by widening mask's block:
+
+    mask top 64, block  8  16  32(default) 128  512  2048
+    needle/12           8   9      10        5    4     2
+
+At block 2048 - one page set for the whole ubatch, i.e. gather's granularity - mask lands on
+gather's score. Note 32 is an optimum, not a floor: at 8 queries the page scores come from
+too few queries and the selection turns noisy. Block size is free in mask mode (1990/2066 t/s
+at QB 8 against 2063/1971 at QB 32), the full-span read dominates.
+
+Why gather cannot buy it:
+- one gather per 32-query block = 64 blocks at ub 2048, each needing its own copy of the
+  shared exact + summary tiers ~ 2.4 GB per layer. Not viable.
+- one gather of the union of all blocks' selections: the union was measured at 47-82% of all
+  pages, i.e. mask's cost without mask's simplicity.
+
+So within the current tier structure there is no cheap path. The lever that has not been
+tried is the tier structure itself - richer page summaries (more than one mean per page, or a
+second-level summary) so that a coarse selection loses less information. That, not selection
+granularity, is where a further attempt should go.
+
+## 2i. per-block gather - the recipe, and why it was not built
+
+Kept because the tensor plumbing was worked out and is not obvious. `ggml_get_rows`
+is batched on the index tensor, so `get_rows(k_rows[D*ps, P_full], sel[kP, n_blk])`
+returns `[D*ps, kP, n_blk]` directly - no index arithmetic. `ggml_flash_attn_ext`
+requires `q->ne[3] == k->ne[3]` and broadcasts the mask over ne[3], so block-diagonal
+attention IS expressible: `q4 = [D, QB, Hq, n_blk]`, `kk4 = [D, N_set, Hkv, n_blk]`,
+`mask4 = [N_set, QB, 1, n_blk]`, and the attention FLOPs are unchanged.
+
+What kills it is 2h: the granularity has to be 32 queries, so n_blk = 64 at ub 2048,
+and the shared exact + summary tiers have to be replicated per block (~2.4 GB/layer).
+At QB 256 the replication is affordable (~300 MB/layer) but the quality is not there
+(mask itself only scores 5/12 at block 128).
 
 ## 3. OPEN INVESTIGATION - the multikey3 retrieval failure (IMPORTANT)
 

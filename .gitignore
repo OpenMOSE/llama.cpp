@@ -23,7 +23,7 @@
 *.DS_Store
 
 # IDE / OS
-
+/.rocprofv3/
 /.cache/
 /.ccls-cache/
 /.direnv/

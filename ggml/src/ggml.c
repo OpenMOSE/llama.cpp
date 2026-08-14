@@ -1084,6 +1084,8 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "DSV4_HC_PRE",
     "DSV4_HC_POST",
     "LOD_ATTN",
+    "LOD2_UPDATE",
+    "LOD2_ATTN",
 
     "UNARY",
 
@@ -1101,7 +1103,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GLU",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -1200,6 +1202,8 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "dsv4_hc_pre(x, weights)",
     "dsv4_hc_post(x, residual, post, comb)",
     "lod_attn(q, k, v, ks, vs, sel)",
+    "lod2_update(k, v, s_kv, p_kv, p_idx, s_pg)",
+    "lod2_attn(q, k, v, s_kv, p_kv, p_idx, s_pg)",
 
     "unary(x)",
 
@@ -1217,7 +1221,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "glu(x)",
 };
 
-static_assert(GGML_OP_COUNT == 102, "GGML_OP_COUNT != 102");
+static_assert(GGML_OP_COUNT == 104, "GGML_OP_COUNT != 104");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -6395,6 +6399,168 @@ struct ggml_tensor * ggml_lod_attn(
     result->src[4] = v_sums;
     result->src[5] = sel;
     result->src[6] = state;
+
+    return result;
+}
+
+// ggml_lod2_update / ggml_lod2_attn
+
+static void ggml_lod2_check_state(
+        const struct ggml_tensor * k,
+        const struct ggml_tensor * v,
+        const struct ggml_tensor * s_kv,
+        const struct ggml_tensor * p_kv,
+        const struct ggml_tensor * p_idx,
+        const struct ggml_tensor * s_pg) {
+    GGML_ASSERT(s_kv->type  == GGML_TYPE_F32);
+    GGML_ASSERT(p_kv->type  == GGML_TYPE_F32);
+    GGML_ASSERT(p_idx->type == GGML_TYPE_I32);
+    GGML_ASSERT(s_pg->type  == GGML_TYPE_I32);
+
+    GGML_ASSERT(ggml_is_contiguous(s_kv));
+    GGML_ASSERT(ggml_is_contiguous(p_kv));
+    GGML_ASSERT(ggml_is_contiguous(p_idx));
+    GGML_ASSERT(ggml_is_contiguous(s_pg));
+
+    // rows are key_sum | value_sum | count
+    GGML_ASSERT(s_kv->ne[0] == k->ne[0] + v->ne[0] + 1);
+    GGML_ASSERT(p_kv->ne[0] == s_kv->ne[0]);
+
+    // one row per kv head in every table
+    GGML_ASSERT(s_kv->ne[2]  == k->ne[2]);
+    GGML_ASSERT(p_kv->ne[2]  == k->ne[2]);
+    GGML_ASSERT(p_idx->ne[2] == k->ne[2]);
+    GGML_ASSERT(s_pg->ne[2]  == k->ne[2]);
+
+    GGML_ASSERT(p_idx->ne[1] == p_kv->ne[1]);
+    GGML_ASSERT(s_pg->ne[1]  == s_kv->ne[1]);
+
+    GGML_ASSERT(k->ne[1] == v->ne[1]);
+    GGML_ASSERT(k->ne[2] == v->ne[2]);
+}
+
+struct ggml_tensor * ggml_lod2_update(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * s_kv,
+        struct ggml_tensor  * s_mn,
+        struct ggml_tensor  * p_kv,
+        struct ggml_tensor  * p_idx,
+        struct ggml_tensor  * s_pg,
+        struct ggml_tensor  * meta,
+        int                   p0,
+        int                   p1,
+        int                   s_len,
+        int                   s_len_new,
+        int                   sink_len) {
+    ggml_lod2_check_state(k, v, s_kv, p_kv, p_idx, s_pg);
+
+    GGML_ASSERT(meta->type == GGML_TYPE_I32);
+    GGML_ASSERT(meta->ne[1] == k->ne[2]);
+
+    // the maintained means: what routing and the coarse branch actually read
+    GGML_ASSERT(s_mn->type == GGML_TYPE_F32);
+    GGML_ASSERT(s_mn->ne[0] == s_kv->ne[0] - 1);
+    GGML_ASSERT(s_mn->ne[1] == s_kv->ne[1]);
+    GGML_ASSERT(s_mn->ne[2] == s_kv->ne[2]);
+
+    // p0 == p1 is an empty update: the graph pads its block list to a fixed
+    // length so that its node count does not vary between ubatches, and every
+    // backend returns without touching the state for those.
+    GGML_ASSERT(0 <= p0 && p0 <= p1 && p1 <= k->ne[1]);
+    GGML_ASSERT(0 <= s_len && s_len <= s_len_new && s_len_new <= s_kv->ne[1]);
+    GGML_ASSERT(s_len_new - s_len <= p1 - p0); // at most one new slot per token
+    GGML_ASSERT(sink_len >= 0);
+
+    // the state starts empty only once, and then every column becomes a slot
+    GGML_ASSERT(s_len > 0 || s_len_new == p1 - p0);
+
+    struct ggml_tensor * result = ggml_view_tensor(ctx, s_kv);
+
+    ggml_set_op_params_i32(result, 0, p0);
+    ggml_set_op_params_i32(result, 1, p1);
+    ggml_set_op_params_i32(result, 2, s_len);
+    ggml_set_op_params_i32(result, 3, s_len_new);
+    ggml_set_op_params_i32(result, 4, sink_len);
+
+    result->op     = GGML_OP_LOD2_UPDATE;
+    result->src[0] = k;
+    result->src[1] = v;
+    result->src[2] = s_kv;
+    result->src[3] = p_kv;
+    result->src[4] = p_idx;
+    result->src[5] = s_pg;
+    result->src[6] = meta;
+    result->src[7] = s_mn;
+
+    return result;
+}
+
+struct ggml_tensor * ggml_lod2_attn(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * s_kv,
+        struct ggml_tensor  * s_mn,
+        struct ggml_tensor  * p_kv,
+        struct ggml_tensor  * p_idx,
+        struct ggml_tensor  * s_pg,
+        struct ggml_tensor  * meta,
+        struct ggml_tensor  * logits,
+        int                   l0,
+        int                   s_len,
+        int                   n_routes,
+        int                   sink_len,
+        float                 scale) {
+    ggml_lod2_check_state(k, v, s_kv, p_kv, p_idx, s_pg);
+
+    GGML_ASSERT(meta->type == GGML_TYPE_I32 && ggml_nelements(meta) >= 1);
+    GGML_ASSERT(s_mn->type == GGML_TYPE_F32);
+    GGML_ASSERT(s_mn->ne[0] == s_kv->ne[0] - 1);
+
+    // The contraction that dominates prefill is a GEMM, done outside the op.
+    // It is optional: with many queries the mean table is read once and reused
+    // across the whole tile, which is what a GEMM is for, but a single query
+    // turns it into a GEMV that re-reads the table once per query head.  Passing
+    // null asks the op to compute the logits itself, once per KV head.
+    if (logits) {
+        GGML_ASSERT(logits->type == GGML_TYPE_F32);
+        GGML_ASSERT(ggml_is_contiguous(logits));
+        GGML_ASSERT(logits->ne[0] >= s_len); // s_len == 0 still needs a valid row
+        GGML_ASSERT(logits->ne[1] == q->ne[1]);
+        GGML_ASSERT(logits->ne[2] == q->ne[2]);
+    }
+
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(q->ne[0] == k->ne[0]);
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0); // GQA broadcast over kv heads
+
+    GGML_ASSERT(l0 >= 0);
+    GGML_ASSERT(0 <= s_len && s_len <= s_kv->ne[1]);
+    GGML_ASSERT(n_routes >= 0 && sink_len >= 0);
+
+    const int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], 1 };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    ggml_set_op_params_i32(result, 0, l0);
+    ggml_set_op_params_i32(result, 1, s_len);
+    ggml_set_op_params_i32(result, 2, n_routes);
+    ggml_set_op_params_i32(result, 3, sink_len);
+    ggml_set_op_params_f32(result, 4, scale);
+
+    result->op     = GGML_OP_LOD2_ATTN;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = s_kv;
+    result->src[4] = p_kv;
+    result->src[5] = p_idx;
+    result->src[6] = s_pg;
+    result->src[7] = meta;
+    result->src[8] = s_mn;
+    result->src[9] = logits;
 
     return result;
 }

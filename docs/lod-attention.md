@@ -738,6 +738,64 @@ Consequences, all of which cost time in this work before the cause was known:
 - If long-form quality matters more than prefill speed, this is a concrete argument for
   `--lod-prefill mask` beyond the depth-scaling trade already documented.
 
+### Tried and removed: stratified page selection
+
+Recorded so nobody rebuilds it. To attack the non-monotonicity above, the global top-k over
+the page axis was replaced by "best k/r pages inside each of r equal slices" - same number of
+pages read, no tensor shape changed, so the static graph and its reuse were untouched, and
+prefill throughput was unaffected (2605/2495 t/s against 2538/2596). Measured on gemma4-31B
+at 24k:
+
+| | r=1 (kept) | r=2 | r=4 |
+| --- | --- | --- | --- |
+| coverage, top 48 | 7/12 | **12/12** | 6/12 |
+| coverage, top 56 | 7/12 | **12/12** | 12/12 |
+| needle /12, top 32 | 3/12 | 3/12 | 1/12 |
+| needle /12, top 64 | **4/12** | 2/12 | 1/12 |
+
+It fixes the coverage hole and costs needle retrieval, monotonically in r. Since the reason
+to touch gather at all was to approach mask's *needle* behaviour, a knob that trades needle
+away is the wrong direction, and the code was reverted. The implementation note worth
+keeping: index arithmetic on the I32 selection (`ggml_add`/`ggml_cast` on I32) silently
+produces garbage - the working form kept the indices slice-local and let a batched
+`ggml_get_rows` over a slice-shaped view resolve them.
+
+### Why gather cannot cheaply reach mask's needle score
+
+The gap is large and it is entirely query granularity. gemma4-31B, needle on 12 documents:
+
+| budget | gather | mask |
+| --- | --- | --- |
+| top 32 | 3/12 | 3/12 |
+| top 64 | 4/12 | **10/12** |
+| top 128 | 6/12 | **12/12 (dense)** |
+
+Widening mask's selection block to the whole ubatch - which is exactly gather's granularity -
+collapses it onto gather:
+
+| mask block size (top 64) | needle /12 |
+| --- | --- |
+| 8 | 8/12 |
+| 16 | 9/12 |
+| **32 (default)** | **10/12** |
+| 128 | 5/12 |
+| 512 | 4/12 |
+| 2048 (one set per ubatch) | 2/12 |
+
+So the required granularity is ~32 queries, and it is a genuine optimum rather than "smaller
+is better" - at 8 queries the page scores are estimated from too few queries and the
+selection gets noisy. Block size costs nothing in mask mode (1990/2066 t/s at QB 8 against
+2063/1971 at QB 32; the full-span read dominates), which is why the default is right.
+
+The consequence for gather is unfavourable. Serving 32-query granularity from a gathered KV
+set means either one gather per block - 64 blocks at ub 2048, and each block needs its own
+copy of the shared exact/summary tiers, roughly 2.4 GB per layer - or one gather of the union
+of all blocks' selections, which was measured at 47-82% of all pages, i.e. mask's cost
+without mask's simplicity. **Within the current tier structure there is no cheap path from
+gather's cost to mask's needle quality.** If this is worth another attempt, the thing to
+change is the tier structure itself - richer page summaries so that a coarse selection loses
+less - not the selection granularity.
+
 ### Sensitivity is real even where the allocation does not pay
 
 Worth keeping separately from the negative result above, because it is reproducible and it

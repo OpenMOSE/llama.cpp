@@ -293,6 +293,7 @@ if (NOT GGML_BACKEND_DL)
     llama_build_and_test(test-rope.cpp)
     llama_build_and_test(test-col2im-1d.cpp)
     llama_build_and_test(test-lod-attention.cpp)
+    llama_build_and_test(test-lod2.cpp)
 endif()
 
 # libmtmd
